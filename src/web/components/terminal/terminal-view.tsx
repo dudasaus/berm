@@ -1394,7 +1394,7 @@ export function TerminalView() {
 
           <ResizablePanel defaultSize={isStackedLayout ? 64 : 72} minSize={isStackedLayout ? 40 : 35}>
             <Card className="h-full rounded-none border-0 bg-transparent shadow-none">
-              <CardContent className="h-full rounded-md bg-[#1f1811] p-3">
+              <CardContent className="h-full rounded-none bg-[#1f1811] p-3">
                 {selectedSession && selectedProjectId ? (
                   <TerminalPane
                     key={`${selectedProjectId}:${selectedSession.id}`}
@@ -1406,7 +1406,7 @@ export function TerminalView() {
                     onSessionUnavailable={handleSessionUnavailable}
                   />
                 ) : (
-                  <div className="flex h-full items-center justify-center rounded-md border border-border/30 bg-[#1f1811] text-center text-sm text-muted-foreground">
+                  <div className="flex h-full items-center justify-center rounded-none border border-border/30 bg-[#1f1811] text-center text-sm text-muted-foreground">
                     <div className="space-y-2">
                       <p>{selectedProjectId ? "No session selected." : "No project selected."}</p>
                       <Button size="sm" variant="secondary" onClick={selectedProjectId ? handleCreateMainAutoSession : handlePickProject}>
