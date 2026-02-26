@@ -450,6 +450,7 @@ export function TerminalView() {
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [sessionOrder, setSessionOrder] = useState<string[]>([]);
   const [isProjectSectionOpen, setIsProjectSectionOpen] = useState(true);
+  const [isSessionSectionOpen, setIsSessionSectionOpen] = useState(true);
   const [isProjectSettingsOpen, setIsProjectSettingsOpen] = useState(false);
   const [projectSettingsWorktreeEnabled, setProjectSettingsWorktreeEnabled] = useState(false);
   const [projectSettingsParentPath, setProjectSettingsParentPath] = useState("");
@@ -1041,12 +1042,7 @@ export function TerminalView() {
         >
           <ResizablePanel defaultSize={isStackedLayout ? 36 : 28} minSize={isStackedLayout ? 25 : 20} className="min-h-0">
             <Card className="flex h-full min-h-0 flex-col rounded-none border-0 bg-transparent shadow-none">
-              <CardHeader className="shrink-0 pb-3">
-                <CardTitle>Control Pane</CardTitle>
-                <CardDescription className="font-mono text-xs">Projects and sessions for the active workspace.</CardDescription>
-              </CardHeader>
-
-              <CardContent className="min-h-0 flex-1 space-y-4 overflow-y-auto pr-1">
+              <CardContent className="min-h-0 flex-1 space-y-4 overflow-y-auto pr-1 pt-3">
                 <section className="rounded-md border border-border bg-card/60 p-2">
                   <button
                     type="button"
@@ -1151,151 +1147,167 @@ export function TerminalView() {
 
                 <Separator />
 
-                <section className="space-y-3">
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="min-w-0">
-                      <p className="font-mono text-xs font-semibold uppercase tracking-wide text-muted-foreground">Session Management</p>
-                      <p className="truncate font-mono text-[11px] text-muted-foreground">
-                        {selectedProject ? `${selectedProject.name}` : "Select a project first"}
-                      </p>
-                    </div>
+                <section className="rounded-md border border-border bg-card/60 p-2">
+                  <button
+                    type="button"
+                    className="flex w-full items-center justify-between rounded-sm px-1 py-1 text-left"
+                    onClick={() => {
+                      setIsSessionSectionOpen((current) => !current);
+                    }}
+                  >
+                    <span className="font-mono text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                      Session Management
+                    </span>
+                    <ChevronDown className={`h-4 w-4 transition-transform ${isSessionSectionOpen ? "rotate-0" : "-rotate-90"}`} />
+                  </button>
 
-                    <DropdownMenu>
-                      <DropdownMenuTrigger asChild>
-                        <Button size="sm" variant="secondary" disabled={createSessionMutation.isPending || !selectedProjectId}>
-                          <Plus className="h-4 w-4" />
-                          New
-                        </Button>
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent align="end" className="w-56">
-                        <DropdownMenuLabel>Create Session</DropdownMenuLabel>
-                        <DropdownMenuSeparator />
-                        <DropdownMenuItem onSelect={handleCreateMainAutoSession}>In main (auto name)</DropdownMenuItem>
-                        <DropdownMenuItem onSelect={handleCreateMainNamedSession}>In main (custom name)</DropdownMenuItem>
-                        {selectedProject?.worktreeEnabled ? (
-                          <DropdownMenuItem
-                            onSelect={handleCreateWorktreeSession}
-                            disabled={!selectedProject.worktreeParentPath}
-                          >
-                            In new worktree branch
-                          </DropdownMenuItem>
-                        ) : null}
-                      </DropdownMenuContent>
-                    </DropdownMenu>
-                  </div>
+                  {isSessionSectionOpen ? (
+                    <div className="space-y-3 px-1 pb-1 pt-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="min-w-0">
+                          <p className="truncate font-mono text-[11px] text-muted-foreground">
+                            {selectedProject ? `${selectedProject.name}` : "Select a project first"}
+                          </p>
+                        </div>
 
-                  {!selectedProjectId ? (
-                    <div className="rounded-md border border-dashed border-border p-3 text-sm text-muted-foreground">
-                      <p>Select a project path to get started.</p>
-                      <Button size="sm" variant="outline" className="mt-2" onClick={handlePickProject}>
-                        <FolderOpen className="h-4 w-4" />
-                        Pick project
-                      </Button>
-                    </div>
-                  ) : sessions.length === 0 ? (
-                    <div className="rounded-md border border-dashed border-border p-3 text-sm text-muted-foreground">
-                      <p>No sessions yet in this project.</p>
-                      <Button size="sm" variant="outline" className="mt-2" onClick={handleCreateMainAutoSession}>
-                        <Plus className="h-4 w-4" />
-                        Create first session
-                      </Button>
-                    </div>
-                  ) : (
-                    <div className="space-y-2">
-                      {orderedSessions.map((session) => {
-                        const isSelected = session.id === selectedSessionId;
-                        const position = sessionOrder.indexOf(session.id);
-                        const canMoveUp = position > 0;
-                        const canMoveDown = position !== -1 && position < sessionOrder.length - 1;
-
-                        return (
-                          <div
-                            key={session.id}
-                            className={`rounded-md border p-2 ${isSelected ? "border-primary/60 bg-primary/10" : "border-border bg-card/60"}`}
-                          >
-                            <div className="flex items-center gap-2">
-                              <button
-                                type="button"
-                                className="min-w-0 flex-1 text-left"
-                                onClick={() => {
-                                  setSelectedSessionId(session.id);
-                                }}
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <Button size="sm" variant="secondary" disabled={createSessionMutation.isPending || !selectedProjectId}>
+                              <Plus className="h-4 w-4" />
+                              New
+                            </Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end" className="w-56">
+                            <DropdownMenuLabel>Create Session</DropdownMenuLabel>
+                            <DropdownMenuSeparator />
+                            <DropdownMenuItem onSelect={handleCreateMainAutoSession}>In main (auto name)</DropdownMenuItem>
+                            <DropdownMenuItem onSelect={handleCreateMainNamedSession}>In main (custom name)</DropdownMenuItem>
+                            {selectedProject?.worktreeEnabled ? (
+                              <DropdownMenuItem
+                                onSelect={handleCreateWorktreeSession}
+                                disabled={!selectedProject.worktreeParentPath}
                               >
-                                <p className="truncate font-mono text-sm font-semibold">{session.id}</p>
-                                <p className="font-mono text-[11px] text-muted-foreground">
-                                  active {new Date(session.lastActiveAt).toLocaleTimeString()} · clients {session.attachedClients}
-                                </p>
-                                <div className="mt-1 flex items-center gap-1">
-                                  <Badge
-                                    variant={session.workspaceType === "worktree" ? "secondary" : "outline"}
-                                    className="font-mono text-[10px] uppercase tracking-wide"
-                                  >
-                                    {session.workspaceType}
-                                  </Badge>
-                                  <span className="truncate font-mono text-[10px] text-muted-foreground">
-                                    {session.workspaceType === "worktree" ? session.workspacePath : "project root"}
-                                  </span>
-                                </div>
-                              </button>
+                                In new worktree branch
+                              </DropdownMenuItem>
+                            ) : null}
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      </div>
 
-                              <div className="flex items-center">
-                                <Tooltip>
-                                  <TooltipTrigger asChild>
-                                    <Button
-                                      size="icon"
-                                      variant="ghost"
-                                      className="h-7 w-7"
-                                      disabled={!canMoveUp}
-                                      onClick={() => {
-                                        moveSession(session.id, -1);
-                                      }}
-                                    >
-                                      <ChevronUp className="h-4 w-4" />
-                                    </Button>
-                                  </TooltipTrigger>
-                                  <TooltipContent>Move up</TooltipContent>
-                                </Tooltip>
+                      {!selectedProjectId ? (
+                        <div className="rounded-md border border-dashed border-border p-3 text-sm text-muted-foreground">
+                          <p>Select a project path to get started.</p>
+                          <Button size="sm" variant="outline" className="mt-2" onClick={handlePickProject}>
+                            <FolderOpen className="h-4 w-4" />
+                            Pick project
+                          </Button>
+                        </div>
+                      ) : sessions.length === 0 ? (
+                        <div className="rounded-md border border-dashed border-border p-3 text-sm text-muted-foreground">
+                          <p>No sessions yet in this project.</p>
+                          <Button size="sm" variant="outline" className="mt-2" onClick={handleCreateMainAutoSession}>
+                            <Plus className="h-4 w-4" />
+                            Create first session
+                          </Button>
+                        </div>
+                      ) : (
+                        <div className="space-y-2">
+                          {orderedSessions.map((session) => {
+                            const isSelected = session.id === selectedSessionId;
+                            const position = sessionOrder.indexOf(session.id);
+                            const canMoveUp = position > 0;
+                            const canMoveDown = position !== -1 && position < sessionOrder.length - 1;
 
-                                <Tooltip>
-                                  <TooltipTrigger asChild>
-                                    <Button
-                                      size="icon"
-                                      variant="ghost"
-                                      className="h-7 w-7"
-                                      disabled={!canMoveDown}
-                                      onClick={() => {
-                                        moveSession(session.id, 1);
-                                      }}
-                                    >
-                                      <ChevronDown className="h-4 w-4" />
-                                    </Button>
-                                  </TooltipTrigger>
-                                  <TooltipContent>Move down</TooltipContent>
-                                </Tooltip>
-                              </div>
-
-                              <Tooltip>
-                                <TooltipTrigger asChild>
-                                  <Button
-                                    size="icon"
-                                    variant="ghost"
-                                    className="h-7 w-7"
+                            return (
+                              <div
+                                key={session.id}
+                                className={`rounded-md border p-2 ${isSelected ? "border-primary/60 bg-primary/10" : "border-border bg-card/60"}`}
+                              >
+                                <div className="flex items-center gap-2">
+                                  <button
+                                    type="button"
+                                    className="min-w-0 flex-1 text-left"
                                     onClick={() => {
-                                      handleDeleteSession(session.id);
+                                      setSelectedSessionId(session.id);
                                     }}
-                                    disabled={deleteSessionMutation.isPending}
                                   >
-                                    <Trash2 className="h-4 w-4" />
-                                  </Button>
-                                </TooltipTrigger>
-                                <TooltipContent>Delete session</TooltipContent>
-                              </Tooltip>
-                            </div>
-                          </div>
-                        );
-                      })}
+                                    <p className="truncate font-mono text-sm font-semibold">{session.id}</p>
+                                    <p className="font-mono text-[11px] text-muted-foreground">
+                                      active {new Date(session.lastActiveAt).toLocaleTimeString()} · clients {session.attachedClients}
+                                    </p>
+                                    <div className="mt-1 flex items-center gap-1">
+                                      <Badge
+                                        variant={session.workspaceType === "worktree" ? "secondary" : "outline"}
+                                        className="font-mono text-[10px] uppercase tracking-wide"
+                                      >
+                                        {session.workspaceType}
+                                      </Badge>
+                                      <span className="truncate font-mono text-[10px] text-muted-foreground">
+                                        {session.workspaceType === "worktree" ? session.workspacePath : "project root"}
+                                      </span>
+                                    </div>
+                                  </button>
+
+                                  <div className="flex items-center">
+                                    <Tooltip>
+                                      <TooltipTrigger asChild>
+                                        <Button
+                                          size="icon"
+                                          variant="ghost"
+                                          className="h-7 w-7"
+                                          disabled={!canMoveUp}
+                                          onClick={() => {
+                                            moveSession(session.id, -1);
+                                          }}
+                                        >
+                                          <ChevronUp className="h-4 w-4" />
+                                        </Button>
+                                      </TooltipTrigger>
+                                      <TooltipContent>Move up</TooltipContent>
+                                    </Tooltip>
+
+                                    <Tooltip>
+                                      <TooltipTrigger asChild>
+                                        <Button
+                                          size="icon"
+                                          variant="ghost"
+                                          className="h-7 w-7"
+                                          disabled={!canMoveDown}
+                                          onClick={() => {
+                                            moveSession(session.id, 1);
+                                          }}
+                                        >
+                                          <ChevronDown className="h-4 w-4" />
+                                        </Button>
+                                      </TooltipTrigger>
+                                      <TooltipContent>Move down</TooltipContent>
+                                    </Tooltip>
+                                  </div>
+
+                                  <Tooltip>
+                                    <TooltipTrigger asChild>
+                                      <Button
+                                        size="icon"
+                                        variant="ghost"
+                                        className="h-7 w-7"
+                                        onClick={() => {
+                                          handleDeleteSession(session.id);
+                                        }}
+                                        disabled={deleteSessionMutation.isPending}
+                                      >
+                                        <Trash2 className="h-4 w-4" />
+                                      </Button>
+                                    </TooltipTrigger>
+                                    <TooltipContent>Delete session</TooltipContent>
+                                  </Tooltip>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
                     </div>
-                  )}
+                  ) : null}
                 </section>
 
                 {selectedSession ? (
