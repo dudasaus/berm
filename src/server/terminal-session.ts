@@ -69,6 +69,7 @@ export interface WorktreeHookExecutionDetails {
   stderr: string;
   exitCode: number | null;
   timedOut: boolean;
+  succeeded: boolean;
 }
 
 export interface WorktreeHookFailureDetails {
@@ -87,6 +88,11 @@ export interface ResolveWorktreeHookDecisionRequest {
 export type ResolveWorktreeHookDecisionResult =
   | { action: "abort"; ok: true; cleaned: true }
   | { action: "continue"; session: SessionMetadata };
+
+export interface CreateSessionResult {
+  session: SessionMetadata;
+  hook: WorktreeHookExecutionDetails | null;
+}
 
 interface SessionAttachment {
   client: SessionClient;
@@ -507,9 +513,9 @@ export class TerminalSessionManager {
     return this.sessions.has(this.sessionKey(projectId, sessionId));
   }
 
-  createSession(projectId: string, name?: string): SessionMetadata;
-  createSession(projectId: string, request?: CreateSessionRequest): SessionMetadata;
-  createSession(projectId: string, nameOrRequest?: string | CreateSessionRequest): SessionMetadata {
+  createSession(projectId: string, name?: string): CreateSessionResult;
+  createSession(projectId: string, request?: CreateSessionRequest): CreateSessionResult;
+  createSession(projectId: string, nameOrRequest?: string | CreateSessionRequest): CreateSessionResult {
     this.syncSessionsFromTmux();
     this.assertAvailable();
     this.pruneExpiredWorktreeHookDecisions();
@@ -565,14 +571,14 @@ export class TerminalSessionManager {
         );
       }
 
-      const hookFailure = this.runWorktreeHook(project, branchName, workspacePath);
-      if (hookFailure) {
+      const hookExecution = this.runWorktreeHook(project, branchName, workspacePath);
+      if (hookExecution && !hookExecution.succeeded) {
         const decisionToken = crypto.randomUUID();
         this.pendingWorktreeHookDecisions.set(decisionToken, {
           projectId: project.id,
           branchName,
           workspacePath,
-          hook: hookFailure,
+          hook: hookExecution,
           createdAtMs: Date.now(),
         });
 
@@ -585,18 +591,21 @@ export class TerminalSessionManager {
             projectId: project.id,
             branchName,
             workspacePath,
-            hook: hookFailure,
+            hook: hookExecution,
           },
         );
       }
 
       try {
-        return this.createTrackedSession(project, {
-          sessionId: branchName,
-          workspaceType: "worktree",
-          workspacePath,
-          branchName,
-        });
+        return {
+          session: this.createTrackedSession(project, {
+            sessionId: branchName,
+            workspaceType: "worktree",
+            workspacePath,
+            branchName,
+          }),
+          hook: hookExecution,
+        };
       } catch (error) {
         try {
           this.cleanupWorktreeResources(project.path, workspacePath, branchName);
@@ -611,12 +620,15 @@ export class TerminalSessionManager {
     this.validateMainSessionName(targetName);
     this.assertSessionAvailable(project, targetName);
 
-    return this.createTrackedSession(project, {
-      sessionId: targetName,
-      workspaceType: "main",
-      workspacePath: project.path,
-      branchName: null,
-    });
+    return {
+      session: this.createTrackedSession(project, {
+        sessionId: targetName,
+        workspaceType: "main",
+        workspacePath: project.path,
+        branchName: null,
+      }),
+      hook: null,
+    };
   }
 
   resolveWorktreeHookDecision(
@@ -1195,9 +1207,7 @@ export class TerminalSessionManager {
     });
 
     const timedOut = result.exitedDueToTimeout === true;
-    if (result.exitCode === 0 && !timedOut) {
-      return null;
-    }
+    const succeeded = result.exitCode === 0 && !timedOut;
 
     return {
       command,
@@ -1205,6 +1215,7 @@ export class TerminalSessionManager {
       stderr: textDecoder.decode(result.stderr),
       exitCode: typeof result.exitCode === "number" ? result.exitCode : null,
       timedOut,
+      succeeded,
     };
   }
 

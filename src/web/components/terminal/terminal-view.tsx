@@ -81,6 +81,12 @@ type WorktreeHookExecutionDetails = {
   stderr: string;
   exitCode: number | null;
   timedOut: boolean;
+  succeeded: boolean;
+};
+
+type CreateSessionResponse = {
+  session: SessionMetadata;
+  hook: WorktreeHookExecutionDetails | null;
 };
 
 type WorktreeHookFailurePayload = {
@@ -90,6 +96,12 @@ type WorktreeHookFailurePayload = {
   projectId: string;
   branchName: string;
   workspacePath: string;
+  hook: WorktreeHookExecutionDetails;
+};
+
+type HookOutputDialogState = {
+  title: string;
+  description: string;
   hook: WorktreeHookExecutionDetails;
 };
 
@@ -183,7 +195,7 @@ async function createSession(
   request:
     | { projectId: string; mode?: "main"; name?: string }
     | { projectId: string; mode: "worktree"; branchName: string },
-) {
+): Promise<CreateSessionResponse> {
   const response = await fetch(`/api/projects/${encodeURIComponent(request.projectId)}/sessions`, {
     method: "POST",
     headers: {
@@ -205,7 +217,27 @@ async function createSession(
     throw new ApiRequestError(message, response.status, errorPayload);
   }
 
-  return payload as SessionMetadata;
+  if (payload && typeof payload === "object" && "session" in payload) {
+    const result = payload as {
+      session?: SessionMetadata;
+      hook?: unknown;
+    };
+
+    if (!result.session || typeof result.session !== "object") {
+      throw new Error("create session response missing session metadata");
+    }
+
+    return {
+      session: result.session,
+      hook: toHookExecutionDetails(result.hook),
+    };
+  }
+
+  // Backward compatibility for older payload shape.
+  return {
+    session: payload as SessionMetadata,
+    hook: null,
+  };
 }
 
 async function updateProject(request: {
@@ -381,6 +413,34 @@ function promptForBranchName(): string | null {
   return trimmed || null;
 }
 
+function hasHookOutput(hook: WorktreeHookExecutionDetails | null | undefined): boolean {
+  if (!hook) {
+    return false;
+  }
+
+  return hook.stdout.trim().length > 0 || hook.stderr.trim().length > 0;
+}
+
+function toHookExecutionDetails(value: unknown): WorktreeHookExecutionDetails | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const record = value as Record<string, unknown>;
+  if (typeof record.command !== "string") {
+    return null;
+  }
+
+  return {
+    command: record.command,
+    stdout: typeof record.stdout === "string" ? record.stdout : "",
+    stderr: typeof record.stderr === "string" ? record.stderr : "",
+    exitCode: typeof record.exitCode === "number" ? record.exitCode : null,
+    timedOut: record.timedOut === true,
+    succeeded: record.succeeded === true,
+  };
+}
+
 export function TerminalView() {
   const terminalRef = useRef<TerminalPaneHandle | null>(null);
   const queryClient = useQueryClient();
@@ -397,6 +457,7 @@ export function TerminalView() {
   const [projectSettingsHookCommand, setProjectSettingsHookCommand] = useState("");
   const [projectSettingsHookTimeoutMs, setProjectSettingsHookTimeoutMs] = useState("15000");
   const [worktreeHookFailure, setWorktreeHookFailure] = useState<WorktreeHookFailurePayload | null>(null);
+  const [hookOutputDialog, setHookOutputDialog] = useState<HookOutputDialogState | null>(null);
   const [isStackedLayout, setIsStackedLayout] = useState(() => {
     if (typeof window === "undefined") {
       return false;
@@ -525,29 +586,41 @@ export function TerminalView() {
 
   const createSessionMutation = useMutation({
     mutationFn: createSession,
-    onSuccess: (createdSession, request) => {
-      setSelectedSessionId(createdSession.id);
+    onSuccess: (created, request) => {
+      setSelectedSessionId(created.session.id);
       setWorktreeHookFailure(null);
-      toast.success(`Created session ${createdSession.id}`);
-      if (
-        request.mode === "worktree" &&
-        selectedProject?.id === createdSession.projectId &&
-        (selectedProject.worktreeHookCommand?.trim().length ?? 0) > 0
-      ) {
-        toast.success("Worktree hook completed successfully");
+      toast.success(`Created session ${created.session.id}`);
+
+      if (request.mode === "worktree" && created.hook?.succeeded) {
+        if (hasHookOutput(created.hook)) {
+          toast.success("Worktree hook completed successfully", {
+            action: {
+              label: "View output",
+              onClick: () => {
+                setHookOutputDialog({
+                  title: "Worktree Hook Output",
+                  description: `Branch ${created.session.branchName ?? created.session.id} completed successfully`,
+                  hook: created.hook!,
+                });
+              },
+            },
+          });
+        } else {
+          toast.success("Worktree hook completed successfully");
+        }
       }
-      void queryClient.invalidateQueries({ queryKey: ["sessions", createdSession.projectId] });
+      void queryClient.invalidateQueries({ queryKey: ["sessions", created.session.projectId] });
     },
     onError: (error) => {
       if (error instanceof ApiRequestError && error.code === "WORKTREE_HOOK_FAILED") {
         const payload = error.payload as Partial<WorktreeHookFailurePayload>;
+        const hook = toHookExecutionDetails(payload.hook);
         if (
           typeof payload.decisionToken === "string" &&
           typeof payload.projectId === "string" &&
           typeof payload.branchName === "string" &&
           typeof payload.workspacePath === "string" &&
-          payload.hook &&
-          typeof payload.hook === "object"
+          hook
         ) {
           setWorktreeHookFailure({
             code: "WORKTREE_HOOK_FAILED",
@@ -556,9 +629,24 @@ export function TerminalView() {
             projectId: payload.projectId,
             branchName: payload.branchName,
             workspacePath: payload.workspacePath,
-            hook: payload.hook as WorktreeHookExecutionDetails,
+            hook,
           });
-          toast.warning("Worktree hook failed. Choose whether to continue or abort.");
+          if (hasHookOutput(hook)) {
+            toast.warning("Worktree hook failed. Choose whether to continue or abort.", {
+              action: {
+                label: "View output",
+                onClick: () => {
+                  setHookOutputDialog({
+                    title: "Worktree Hook Output",
+                    description: `Branch ${payload.branchName} failed`,
+                    hook,
+                  });
+                },
+              },
+            });
+          } else {
+            toast.warning("Worktree hook failed. Choose whether to continue or abort.");
+          }
           return;
         }
       }
@@ -1442,6 +1530,61 @@ export function TerminalView() {
                   disabled={updateProjectMutation.isPending}
                 >
                   Save
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      ) : null}
+
+      {hookOutputDialog ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4">
+          <Card className="w-full max-w-2xl border-border/80 bg-card shadow-xl">
+            <CardHeader className="space-y-1 pb-3">
+              <CardTitle className="text-base">{hookOutputDialog.title}</CardTitle>
+              <CardDescription className="font-mono text-xs">{hookOutputDialog.description}</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="space-y-1">
+                <p className="font-mono text-[11px] uppercase tracking-wide text-muted-foreground">Command</p>
+                <pre className="overflow-x-auto rounded-md border border-border bg-background p-2 font-mono text-xs">
+                  {hookOutputDialog.hook.command}
+                </pre>
+              </div>
+
+              {hookOutputDialog.hook.stdout.trim().length > 0 ? (
+                <div className="space-y-1">
+                  <p className="font-mono text-[11px] uppercase tracking-wide text-muted-foreground">stdout</p>
+                  <pre className="max-h-52 overflow-auto rounded-md border border-border bg-background p-2 font-mono text-xs">
+                    {hookOutputDialog.hook.stdout}
+                  </pre>
+                </div>
+              ) : null}
+
+              {hookOutputDialog.hook.stderr.trim().length > 0 ? (
+                <div className="space-y-1">
+                  <p className="font-mono text-[11px] uppercase tracking-wide text-muted-foreground">stderr</p>
+                  <pre className="max-h-52 overflow-auto rounded-md border border-border bg-background p-2 font-mono text-xs">
+                    {hookOutputDialog.hook.stderr}
+                  </pre>
+                </div>
+              ) : null}
+
+              <p className="font-mono text-[11px] text-muted-foreground">
+                Exit code: {hookOutputDialog.hook.exitCode ?? "none"} · timed out:{" "}
+                {hookOutputDialog.hook.timedOut ? "yes" : "no"} · succeeded:{" "}
+                {hookOutputDialog.hook.succeeded ? "yes" : "no"}
+              </p>
+
+              <div className="flex justify-end">
+                <Button
+                  type="button"
+                  size="sm"
+                  onClick={() => {
+                    setHookOutputDialog(null);
+                  }}
+                >
+                  Close
                 </Button>
               </div>
             </CardContent>

@@ -175,8 +175,9 @@ describe("TerminalSessionManager (tmux, projects)", () => {
       throw error;
     }
 
-    expect(created.id).toBe(sessionId);
-    expect(created.projectId).toBe(project.id);
+    expect(created.session.id).toBe(sessionId);
+    expect(created.session.projectId).toBe(project.id);
+    expect(created.hook).toBeNull();
 
     const listed = context.manager.listSessions(project.id);
     expect(listed.some((session) => session.id === sessionId)).toBe(true);
@@ -399,14 +400,15 @@ describe("TerminalSessionManager (tmux, projects)", () => {
       throw error;
     }
 
-    expect(created.id).toBe(branchName);
-    expect(created.workspaceType).toBe("worktree");
-    expect(created.branchName).toBe(branchName);
-    expect(existsSync(created.workspacePath)).toBe(true);
+    expect(created.session.id).toBe(branchName);
+    expect(created.session.workspaceType).toBe("worktree");
+    expect(created.session.branchName).toBe(branchName);
+    expect(existsSync(created.session.workspacePath)).toBe(true);
+    expect(created.hook).toBeNull();
 
     const deleted = context.manager.deleteSession(project.id, branchName);
     expect(deleted).toBe(true);
-    expect(existsSync(created.workspacePath)).toBe(false);
+    expect(existsSync(created.session.workspacePath)).toBe(false);
 
     const branchLookup = runGit(repoPath, ["branch", "--list", branchName]);
     expect(branchLookup.exitCode).toBe(0);
@@ -480,6 +482,46 @@ describe("TerminalSessionManager (tmux, projects)", () => {
     const deleted = context.manager.deleteSession(project.id, branchName);
     expect(deleted).toBe(true);
     expect(existsSync(workspacePath)).toBe(false);
+  });
+
+  test("returns hook output on successful worktree hook execution", () => {
+    const context = createContext("worktree-hook-success");
+    if (!context.manager.isTmuxAvailable() || !isGitAvailable()) {
+      return;
+    }
+
+    const repoPath = createGitProjectPath("worktree-hook-success-repo");
+    const worktreeParentPath = createProjectPath("worktree-hook-success-parent");
+    context.projectPaths.push(repoPath, worktreeParentPath);
+
+    const project = context.manager.selectProject(repoPath);
+    context.manager.updateProject(project.id, {
+      worktreeEnabled: true,
+      worktreeParentPath,
+      worktreeHookCommand: "echo hook-success-stdout; echo hook-success-stderr >&2; exit 0",
+      worktreeHookTimeoutMs: 15_000,
+    });
+
+    const branchName = `hook-success-${uniqueSuffix()}`;
+    let created: ReturnType<TerminalSessionManager["createSession"]>;
+    try {
+      created = context.manager.createSession(project.id, { mode: "worktree", branchName });
+    } catch (error) {
+      if (shouldSkipTmux(error)) {
+        return;
+      }
+      throw error;
+    }
+
+    expect(created.session.id).toBe(branchName);
+    expect(created.hook).not.toBeNull();
+    expect(created.hook?.succeeded).toBe(true);
+    expect(created.hook?.stdout.includes("hook-success-stdout")).toBe(true);
+    expect(created.hook?.stderr.includes("hook-success-stderr")).toBe(true);
+
+    const deleted = context.manager.deleteSession(project.id, branchName);
+    expect(deleted).toBe(true);
+    expect(existsSync(created.session.workspacePath)).toBe(false);
   });
 
   test("supports abort decision after worktree hook failure", () => {

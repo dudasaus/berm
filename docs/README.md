@@ -122,6 +122,8 @@ Validation rules for selection:
 - `POST /api/projects/:projectId/sessions`
   - Main session: `{ mode: "main", name? }`
   - Worktree session: `{ mode: "worktree", branchName }`
+  - Success response: `{ session, hook }`
+  - `hook` is `null` when no hook command runs; otherwise includes command, stdout, stderr, exit code, timeout, and success status
 - `POST /api/projects/:projectId/sessions/worktree-hook-decision`
   - Resolve failed hook with `{ decisionToken, decision }`
   - `decision` is `"abort"` (cleanup worktree+branch) or `"continue"` (create tmux session anyway)

@@ -3,6 +3,7 @@ import { rmSync } from "node:fs";
 
 import { createServerConfig, type SessionManagerLike } from "../../src/server/index";
 import {
+  type CreateSessionResult,
   TerminalSessionManager,
   type CreateSessionRequest,
   type ProjectMetadata,
@@ -117,7 +118,7 @@ class FakeSessionManager implements SessionManagerLike {
     return [...this.sessions.values()].filter((session) => session.projectId === projectId);
   }
 
-  createSession(projectId: string, request?: CreateSessionRequest): SessionMetadata {
+  createSession(projectId: string, request?: CreateSessionRequest): CreateSessionResult {
     const project = this.projects.get(projectId);
     if (!project) {
       throw new Error("project missing");
@@ -149,7 +150,18 @@ class FakeSessionManager implements SessionManagerLike {
       branchName: mode === "worktree" ? sessionId : null,
     };
     this.sessions.set(sessionKey(projectId, sessionId), metadata);
-    return metadata;
+    const hook =
+      mode === "worktree"
+        ? {
+            command: "echo fake-hook",
+            stdout: "",
+            stderr: "",
+            exitCode: 0,
+            timedOut: false,
+            succeeded: true,
+          }
+        : null;
+    return { session: metadata, hook };
   }
 
   deleteSession(projectId: string, sessionId: string): boolean {
@@ -174,7 +186,7 @@ class FakeSessionManager implements SessionManagerLike {
       return { action: "abort", ok: true, cleaned: true };
     }
 
-    const session = this.createSession(projectId, { mode: "worktree", branchName: pending.branchName });
+    const session = this.createSession(projectId, { mode: "worktree", branchName: pending.branchName }).session;
     this.pendingHookFailures.delete(request.decisionToken);
     return { action: "continue", session };
   }
@@ -250,6 +262,12 @@ describe("server config routes and websocket", () => {
       POST: (req: Bun.BunRequest<"/api/projects/:projectId/sessions">) => Promise<Response>;
     }).POST(makeRequest<"/api/projects/:projectId/sessions">({ projectId: "p1" }, { mode: "main", name: "main-1" }));
     expect(createMainResponse.status).toBe(201);
+    const createMainPayload = (await createMainResponse.json()) as {
+      session?: { id?: string };
+      hook?: unknown;
+    };
+    expect(createMainPayload.session?.id).toBe("main-1");
+    expect(createMainPayload.hook ?? null).toBeNull();
 
     const createWorktreeResponse = await (routes["/api/projects/:projectId/sessions"] as {
       POST: (req: Bun.BunRequest<"/api/projects/:projectId/sessions">) => Promise<Response>;
@@ -260,6 +278,13 @@ describe("server config routes and websocket", () => {
       ),
     );
     expect(createWorktreeResponse.status).toBe(201);
+    const createWorktreePayload = (await createWorktreeResponse.json()) as {
+      session?: { id?: string };
+      hook?: { command?: string; succeeded?: boolean } | null;
+    };
+    expect(createWorktreePayload.session?.id).toBe("feature/testing");
+    expect(createWorktreePayload.hook?.command).toBe("echo fake-hook");
+    expect(createWorktreePayload.hook?.succeeded).toBe(true);
 
     manager.pendingHookFailures.set("hook-token-abort", {
       projectId: "p1",

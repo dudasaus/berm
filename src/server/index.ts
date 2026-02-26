@@ -1,6 +1,7 @@
 import app from "../web/index.html";
 import { serializeMessage, type ServerMessage } from "../shared/protocol";
 import {
+  type CreateSessionResult,
   type CreateSessionRequest,
   type ProjectMetadata,
   type ResolveWorktreeHookDecisionRequest,
@@ -25,7 +26,7 @@ export interface SessionManagerLike {
   deleteProject(projectId: string): boolean;
   getProject(projectId: string): ProjectMetadata | null;
   listSessions(projectId: string): SessionMetadata[];
-  createSession(projectId: string, request?: CreateSessionRequest): SessionMetadata;
+  createSession(projectId: string, request?: CreateSessionRequest): CreateSessionResult;
   resolveWorktreeHookDecision(projectId: string, request: ResolveWorktreeHookDecisionRequest): ResolveWorktreeHookDecisionResult;
   deleteSession(projectId: string, sessionId: string): boolean;
   hasSession(projectId: string, sessionId: string): boolean;
@@ -222,8 +223,8 @@ export function createServerConfig(
               request = body as CreateSessionRequest;
             }
 
-            const session = manager.createSession(req.params.projectId, request);
-            return Response.json(session, { status: 201 });
+            const created = manager.createSession(req.params.projectId, request);
+            return Response.json(created, { status: 201 });
           } catch (error) {
             return errorResponse(error);
           }
