@@ -1390,7 +1390,7 @@ export function TerminalView() {
             </Card>
           </ResizablePanel>
 
-          <ResizableHandle withHandle />
+          <ResizableHandle withHandle handleDirection={isStackedLayout ? "vertical" : "horizontal"} />
 
           <ResizablePanel defaultSize={isStackedLayout ? 64 : 72} minSize={isStackedLayout ? 40 : 35}>
             <Card className="h-full rounded-none border-0 bg-transparent shadow-none">
