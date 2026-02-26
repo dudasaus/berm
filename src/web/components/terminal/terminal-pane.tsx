@@ -1,4 +1,4 @@
-import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef } from "react";
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef } from "react";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "xterm";
 
@@ -247,7 +247,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
       [],
     );
 
-    useEffect(() => {
+    useLayoutEffect(() => {
       disposedRef.current = false;
       desiredStateRef.current = "connected";
 
@@ -320,6 +320,10 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
       return () => {
         disposedRef.current = true;
         desiredStateRef.current = "closed";
+        const activeTerminal = terminalRef.current;
+
+        terminalRef.current = null;
+        fitAddonRef.current = null;
 
         if (openRafId) {
           window.cancelAnimationFrame(openRafId);
@@ -349,17 +353,16 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
         }
 
         resizeObserverRef.current?.disconnect();
+        resizeObserverRef.current = null;
         removeFontListeners?.();
         onDataDispose?.dispose();
-        if (initialized) {
+        if (initialized && activeTerminal) {
           try {
-            terminal.dispose();
+            activeTerminal.dispose();
           } catch {
             // Prevent dispose race from crashing unmount.
           }
         }
-        terminalRef.current = null;
-        fitAddonRef.current = null;
       };
     }, [reconnect, safeFitAndResize, sendMessage, terminalOptions]);
 
