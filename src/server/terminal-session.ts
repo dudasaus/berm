@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { realpathSync, statSync } from "node:fs";
-import { basename, isAbsolute } from "node:path";
+import { existsSync, realpathSync, statSync } from "node:fs";
+import { basename, isAbsolute, join } from "node:path";
 
 import {
   parseClientMessage,
@@ -14,6 +14,7 @@ import {
   saveSessionRegistry,
   sessionRegistryKey,
   type ProjectRegistryEntry,
+  type SessionWorkspaceType,
   type SessionRegistryEntry,
 } from "./session-registry";
 
@@ -29,6 +30,8 @@ export interface ProjectMetadata {
   path: string;
   createdAt: string;
   lastUsedAt: string;
+  worktreeEnabled: boolean;
+  worktreeParentPath: string | null;
 }
 
 export interface SessionMetadata {
@@ -42,6 +45,18 @@ export interface SessionMetadata {
   createdAt: string;
   lastActiveAt: string;
   attachedClients: number;
+  workspaceType: SessionWorkspaceType;
+  workspacePath: string;
+  branchName: string | null;
+}
+
+export type CreateSessionRequest =
+  | { mode?: "main"; name?: string }
+  | { mode: "worktree"; branchName: string };
+
+export interface UpdateProjectRequest {
+  worktreeEnabled?: boolean;
+  worktreeParentPath?: string | null;
 }
 
 interface SessionAttachment {
@@ -62,6 +77,9 @@ interface TerminalSession {
   lastActiveAtMs: number;
   attachments: Map<string, SessionAttachment>;
   nextSpawnVersion: number;
+  workspaceType: SessionWorkspaceType;
+  workspacePath: string;
+  branchName: string | null;
 }
 
 interface TmuxSessionRef {
@@ -155,7 +173,27 @@ function projectIdForPath(path: string): string {
 }
 
 function sessionTmuxName(projectId: string, sessionId: string): string {
-  return `${projectId}__${sessionId}`;
+  const cleanedSessionId = sessionId.replace(/[^a-zA-Z0-9_-]/g, "-");
+  if (cleanedSessionId === sessionId && cleanedSessionId.length <= 64) {
+    return `${projectId}__${sessionId}`;
+  }
+
+  const prefix = cleanedSessionId.slice(0, 32) || "session";
+  const suffix = createHash("sha1").update(sessionId).digest("hex").slice(0, 10);
+  return `${projectId}__${prefix}__${suffix}`;
+}
+
+function sanitizePathToken(value: string): string {
+  return value
+    .trim()
+    .replace(/[^a-zA-Z0-9._-]+/g, "-")
+    .replace(/^-+/, "")
+    .replace(/-+$/, "")
+    .slice(0, 64);
+}
+
+function isMissingBranchError(stderr: string): boolean {
+  return loweredIncludesAny(stderr, ["not found", "unknown revision", "does not exist"]);
 }
 
 export class TerminalSessionManager {
@@ -235,6 +273,8 @@ export class TerminalSessionManager {
       path: selectedPath,
       createdAt: now,
       lastUsedAt: now,
+      worktreeEnabled: false,
+      worktreeParentPath: null,
     };
 
     this.projects.set(id, project);
@@ -249,6 +289,48 @@ export class TerminalSessionManager {
     }
 
     return { ...project };
+  }
+
+  updateProject(projectId: string, input: UpdateProjectRequest): ProjectMetadata {
+    this.syncSessionsFromTmux();
+    this.assertAvailable();
+
+    const existing = this.requireProject(projectId);
+
+    let worktreeEnabled = existing.worktreeEnabled;
+    let worktreeParentPath = existing.worktreeParentPath;
+
+    if (typeof input.worktreeEnabled !== "undefined") {
+      if (typeof input.worktreeEnabled !== "boolean") {
+        throw new SessionManagerError("worktreeEnabled must be a boolean", 400, "PROJECT_UPDATE_INVALID");
+      }
+      worktreeEnabled = input.worktreeEnabled;
+    }
+
+    if (typeof input.worktreeParentPath !== "undefined") {
+      if (input.worktreeParentPath === null) {
+        worktreeParentPath = null;
+      } else if (typeof input.worktreeParentPath === "string") {
+        worktreeParentPath = this.normalizeProjectPath(input.worktreeParentPath);
+      } else {
+        throw new SessionManagerError(
+          "worktreeParentPath must be a string or null",
+          400,
+          "PROJECT_UPDATE_INVALID",
+        );
+      }
+    }
+
+    const updated: ProjectRegistryEntry = {
+      ...existing,
+      worktreeEnabled,
+      worktreeParentPath,
+      lastUsedAt: new Date().toISOString(),
+    };
+
+    this.projects.set(projectId, updated);
+    this.saveRegistry();
+    return { ...updated };
   }
 
   deleteProject(projectId: string): boolean {
@@ -294,6 +376,15 @@ export class TerminalSessionManager {
         }
       }
 
+      const workspaceType = registryEntry?.workspaceType ?? liveSession?.workspaceType ?? "main";
+      const workspacePath = registryEntry?.workspacePath ?? liveSession?.workspacePath;
+      const branchName = registryEntry?.branchName ?? liveSession?.branchName;
+      const projectRoot = this.projects.get(projectId)?.path;
+
+      if (workspaceType === "worktree" && workspacePath && branchName && projectRoot) {
+        this.cleanupWorktreeResources(projectRoot, workspacePath, branchName);
+      }
+
       this.registrySessions.delete(key);
     }
 
@@ -327,74 +418,90 @@ export class TerminalSessionManager {
     return this.sessions.has(this.sessionKey(projectId, sessionId));
   }
 
-  createSession(projectId: string, name?: string): SessionMetadata {
+  createSession(projectId: string, name?: string): SessionMetadata;
+  createSession(projectId: string, request?: CreateSessionRequest): SessionMetadata;
+  createSession(projectId: string, nameOrRequest?: string | CreateSessionRequest): SessionMetadata {
     this.syncSessionsFromTmux();
     this.assertAvailable();
 
     const project = this.requireProject(projectId);
+    const request = this.normalizeCreateSessionRequest(nameOrRequest);
 
-    const targetName = name?.trim() ? name.trim() : this.nextAutoName(project.id);
-    this.validateSessionName(targetName);
-
-    const key = this.sessionKey(project.id, targetName);
-    const tmuxSessionName = sessionTmuxName(project.id, targetName);
-    if (this.sessions.has(key) || this.registrySessions.has(key) || this.tmuxSessionExists(tmuxSessionName)) {
-      throw new SessionManagerError(`Session '${targetName}' already exists in project '${project.name}'`, 409, "SESSION_EXISTS");
-    }
-
-    const createResult = this.runTmux(["new-session", "-d", "-s", tmuxSessionName, "-c", project.path, "zsh"]);
-    if (createResult.exitCode !== 0) {
-      throw new SessionManagerError(
-        `Failed to create tmux session '${targetName}': ${createResult.stderr || "unknown error"}`,
-        500,
-        "SESSION_CREATE_FAILED",
-      );
-    }
-
-    if (!this.tmuxSessionExists(tmuxSessionName)) {
-      const details = createResult.stderr || "tmux did not report an active session";
-      if (isTmuxUnavailableError(details)) {
+    if (request.mode === "worktree") {
+      if (!project.worktreeEnabled) {
         throw new SessionManagerError(
-          `tmux is not accessible in this environment: ${details}`,
-          503,
-          "TMUX_UNAVAILABLE",
+          `Project '${project.name}' is not configured for worktrees`,
+          400,
+          "WORKTREE_DISABLED",
         );
       }
 
-      throw new SessionManagerError(
-        `Failed to create tmux session '${targetName}': ${details}`,
-        500,
-        "SESSION_CREATE_FAILED",
-      );
+      if (!project.worktreeParentPath) {
+        throw new SessionManagerError(
+          `Project '${project.name}' has no worktree parent path configured`,
+          400,
+          "WORKTREE_PARENT_REQUIRED",
+        );
+      }
+
+      const branchName = request.branchName.trim();
+      this.validateBranchName(branchName);
+      this.assertSessionAvailable(project, branchName);
+
+      const workspacePath = this.resolveWorktreePath(project, branchName);
+      if (existsSync(workspacePath)) {
+        throw new SessionManagerError(
+          `Target worktree path already exists: ${workspacePath}`,
+          409,
+          "WORKTREE_PATH_EXISTS",
+        );
+      }
+
+      const createWorktreeResult = this.runGit(project.path, ["worktree", "add", "-b", branchName, workspacePath]);
+      if (createWorktreeResult.exitCode !== 0) {
+        const details = createWorktreeResult.stderr || "unknown error";
+        if (loweredIncludesAny(details, ["already exists", "not a valid object name"])) {
+          throw new SessionManagerError(
+            `Branch '${branchName}' already exists or is invalid: ${details}`,
+            409,
+            "WORKTREE_BRANCH_EXISTS",
+          );
+        }
+
+        throw new SessionManagerError(
+          `Failed to create worktree '${branchName}': ${details}`,
+          500,
+          "WORKTREE_CREATE_FAILED",
+        );
+      }
+
+      try {
+        return this.createTrackedSession(project, {
+          sessionId: branchName,
+          workspaceType: "worktree",
+          workspacePath,
+          branchName,
+        });
+      } catch (error) {
+        try {
+          this.cleanupWorktreeResources(project.path, workspacePath, branchName);
+        } catch {
+          // Keep the original creation error as the primary failure.
+        }
+        throw error;
+      }
     }
 
-    const now = Date.now();
-    const nowIso = new Date(now).toISOString();
-    this.registrySessions.set(key, {
-      projectId: project.id,
+    const targetName = request.name?.trim() ? request.name.trim() : this.nextAutoName(project.id);
+    this.validateMainSessionName(targetName);
+    this.assertSessionAvailable(project, targetName);
+
+    return this.createTrackedSession(project, {
       sessionId: targetName,
-      tmuxSessionName,
-      createdAt: nowIso,
-      lastActiveAt: nowIso,
+      workspaceType: "main",
+      workspacePath: project.path,
+      branchName: null,
     });
-    this.saveRegistry();
-
-    const session: TerminalSession = {
-      key,
-      projectId: project.id,
-      id: targetName,
-      tmuxSessionName,
-      cols: this.options.defaultCols,
-      rows: this.options.defaultRows,
-      state: "ready",
-      createdAtMs: now,
-      lastActiveAtMs: now,
-      attachments: new Map(),
-      nextSpawnVersion: 1,
-    };
-
-    this.sessions.set(key, session);
-    return this.toMetadata(session);
   }
 
   deleteSession(projectId: string, sessionId: string): boolean {
@@ -426,6 +533,15 @@ export class TerminalSessionManager {
         500,
         "SESSION_DELETE_FAILED",
       );
+    }
+
+    const workspaceType = registryEntry?.workspaceType ?? session?.workspaceType ?? "main";
+    const workspacePath = registryEntry?.workspacePath ?? session?.workspacePath;
+    const branchName = registryEntry?.branchName ?? session?.branchName;
+
+    if (workspaceType === "worktree" && workspacePath && branchName) {
+      const project = this.requireProject(projectId);
+      this.cleanupWorktreeResources(project.path, workspacePath, branchName);
     }
 
     this.registrySessions.delete(key);
@@ -561,15 +677,6 @@ export class TerminalSessionManager {
       return;
     }
 
-    const project = this.projects.get(session.projectId);
-    if (!project) {
-      this.broadcastToSession(session, {
-        type: "error",
-        message: "Project is no longer available for this session",
-      });
-      return;
-    }
-
     const clients = [...session.attachments.values()].map((attachment) => attachment.client);
     this.stopAllAttachments(session, false);
 
@@ -584,7 +691,15 @@ export class TerminalSessionManager {
       return;
     }
 
-    const createResult = this.runTmux(["new-session", "-d", "-s", session.tmuxSessionName, "-c", project.path, "zsh"]);
+    const createResult = this.runTmux([
+      "new-session",
+      "-d",
+      "-s",
+      session.tmuxSessionName,
+      "-c",
+      session.workspacePath,
+      "zsh",
+    ]);
     if (createResult.exitCode !== 0) {
       for (const client of clients) {
         this.sendToClient(client, {
@@ -606,9 +721,7 @@ export class TerminalSessionManager {
 
   private spawnAttachment(session: TerminalSession, client: SessionClient): void {
     const spawnVersion = session.nextSpawnVersion++;
-
-    const project = this.projects.get(session.projectId);
-    const cwd = project?.path ?? this.options.cwd;
+    const cwd = session.workspacePath;
 
     const proc = Bun.spawn(["tmux", "-L", this.options.tmuxSocketName, "attach-session", "-t", session.tmuxSessionName], {
       cwd,
@@ -725,6 +838,9 @@ export class TerminalSessionManager {
       createdAt: new Date(session.createdAtMs).toISOString(),
       lastActiveAt: new Date(session.lastActiveAtMs).toISOString(),
       attachedClients: session.attachments.size,
+      workspaceType: session.workspaceType,
+      workspacePath: session.workspacePath,
+      branchName: session.branchName,
     };
   }
 
@@ -742,7 +858,164 @@ export class TerminalSessionManager {
     }
   }
 
-  private validateSessionName(name: string): void {
+  private normalizeCreateSessionRequest(
+    input?: string | CreateSessionRequest,
+  ): { mode: "main"; name?: string } | { mode: "worktree"; branchName: string } {
+    if (typeof input === "undefined") {
+      return { mode: "main" };
+    }
+
+    if (typeof input === "string") {
+      return { mode: "main", name: input };
+    }
+
+    if (!input || typeof input !== "object") {
+      throw new SessionManagerError("Session create payload is invalid", 400, "SESSION_CREATE_INVALID");
+    }
+
+    if (input.mode === "worktree") {
+      if (typeof input.branchName !== "string") {
+        throw new SessionManagerError("branchName must be a string", 400, "SESSION_CREATE_INVALID");
+      }
+
+      return {
+        mode: "worktree",
+        branchName: input.branchName,
+      };
+    }
+
+    if (typeof input.mode !== "undefined" && input.mode !== "main") {
+      throw new SessionManagerError("mode must be 'main' or 'worktree'", 400, "SESSION_CREATE_INVALID");
+    }
+
+    if (typeof input.name !== "undefined" && typeof input.name !== "string") {
+      throw new SessionManagerError("name must be a string", 400, "SESSION_CREATE_INVALID");
+    }
+
+    return { mode: "main", name: input.name };
+  }
+
+  private createTrackedSession(
+    project: ProjectRegistryEntry,
+    input: {
+      sessionId: string;
+      workspaceType: SessionWorkspaceType;
+      workspacePath: string;
+      branchName: string | null;
+    },
+  ): SessionMetadata {
+    const key = this.sessionKey(project.id, input.sessionId);
+    const tmuxSessionName = sessionTmuxName(project.id, input.sessionId);
+
+    const createResult = this.runTmux(["new-session", "-d", "-s", tmuxSessionName, "-c", input.workspacePath, "zsh"]);
+    if (createResult.exitCode !== 0) {
+      throw new SessionManagerError(
+        `Failed to create tmux session '${input.sessionId}': ${createResult.stderr || "unknown error"}`,
+        500,
+        "SESSION_CREATE_FAILED",
+      );
+    }
+
+    if (!this.tmuxSessionExists(tmuxSessionName)) {
+      const details = createResult.stderr || "tmux did not report an active session";
+      if (isTmuxUnavailableError(details)) {
+        throw new SessionManagerError(
+          `tmux is not accessible in this environment: ${details}`,
+          503,
+          "TMUX_UNAVAILABLE",
+        );
+      }
+
+      throw new SessionManagerError(
+        `Failed to create tmux session '${input.sessionId}': ${details}`,
+        500,
+        "SESSION_CREATE_FAILED",
+      );
+    }
+
+    const now = Date.now();
+    const nowIso = new Date(now).toISOString();
+    this.registrySessions.set(key, {
+      projectId: project.id,
+      sessionId: input.sessionId,
+      tmuxSessionName,
+      createdAt: nowIso,
+      lastActiveAt: nowIso,
+      workspaceType: input.workspaceType,
+      workspacePath: input.workspacePath,
+      branchName: input.branchName,
+    });
+    this.saveRegistry();
+
+    const session: TerminalSession = {
+      key,
+      projectId: project.id,
+      id: input.sessionId,
+      tmuxSessionName,
+      cols: this.options.defaultCols,
+      rows: this.options.defaultRows,
+      state: "ready",
+      createdAtMs: now,
+      lastActiveAtMs: now,
+      attachments: new Map(),
+      nextSpawnVersion: 1,
+      workspaceType: input.workspaceType,
+      workspacePath: input.workspacePath,
+      branchName: input.branchName,
+    };
+
+    this.sessions.set(key, session);
+    return this.toMetadata(session);
+  }
+
+  private assertSessionAvailable(project: ProjectRegistryEntry, sessionId: string): void {
+    const key = this.sessionKey(project.id, sessionId);
+    const tmuxSessionName = sessionTmuxName(project.id, sessionId);
+    if (this.sessions.has(key) || this.registrySessions.has(key) || this.tmuxSessionExists(tmuxSessionName)) {
+      throw new SessionManagerError(
+        `Session '${sessionId}' already exists in project '${project.name}'`,
+        409,
+        "SESSION_EXISTS",
+      );
+    }
+  }
+
+  private resolveWorktreePath(project: ProjectRegistryEntry, branchName: string): string {
+    if (!project.worktreeParentPath) {
+      throw new SessionManagerError(
+        `Project '${project.name}' has no worktree parent path configured`,
+        400,
+        "WORKTREE_PARENT_REQUIRED",
+      );
+    }
+
+    const projectToken = sanitizePathToken(basename(project.path) || project.name || "project") || "project";
+    const branchToken = sanitizePathToken(branchName) || "branch";
+    const branchSuffix = createHash("sha1").update(branchName).digest("hex").slice(0, 8);
+    return join(project.worktreeParentPath, `${projectToken}-${branchToken}-${branchSuffix}`);
+  }
+
+  private cleanupWorktreeResources(projectPath: string, workspacePath: string, branchName: string): void {
+    const removeResult = this.runGit(projectPath, ["worktree", "remove", workspacePath]);
+    if (removeResult.exitCode !== 0) {
+      throw new SessionManagerError(
+        `Failed to remove worktree '${workspacePath}': ${removeResult.stderr || "unknown error"}. Ensure the worktree is clean and not in use.`,
+        409,
+        "WORKTREE_REMOVE_FAILED",
+      );
+    }
+
+    const deleteBranchResult = this.runGit(projectPath, ["branch", "-d", branchName]);
+    if (deleteBranchResult.exitCode !== 0 && !isMissingBranchError(deleteBranchResult.stderr)) {
+      throw new SessionManagerError(
+        `Failed to delete branch '${branchName}': ${deleteBranchResult.stderr || "unknown error"}. Commit or merge the branch, then retry.`,
+        409,
+        "WORKTREE_BRANCH_DELETE_FAILED",
+      );
+    }
+  }
+
+  private validateMainSessionName(name: string): void {
     if (!name) {
       throw new SessionManagerError("Session name cannot be empty", 400, "SESSION_NAME_INVALID");
     }
@@ -753,6 +1026,30 @@ export class TerminalSessionManager {
         400,
         "SESSION_NAME_INVALID",
       );
+    }
+  }
+
+  private validateBranchName(name: string): void {
+    if (!name) {
+      throw new SessionManagerError("Branch name cannot be empty", 400, "BRANCH_NAME_INVALID");
+    }
+
+    if (!/^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$/.test(name)) {
+      throw new SessionManagerError(
+        "Branch name may only include letters, numbers, dots, underscores, hyphens, and slashes",
+        400,
+        "BRANCH_NAME_INVALID",
+      );
+    }
+
+    if (
+      name.includes("..") ||
+      name.includes("//") ||
+      name.endsWith("/") ||
+      name.endsWith(".lock") ||
+      name.includes("@{")
+    ) {
+      throw new SessionManagerError("Branch name is not valid", 400, "BRANCH_NAME_INVALID");
     }
   }
 
@@ -859,12 +1156,18 @@ export class TerminalSessionManager {
           lastActiveAtMs: registryLastActiveMs,
           attachments: new Map(),
           nextSpawnVersion: 1,
+          workspaceType: registryEntry.workspaceType,
+          workspacePath: registryEntry.workspacePath,
+          branchName: registryEntry.branchName,
         });
         continue;
       }
 
       existing.createdAtMs = createdAtMs;
       existing.state = "ready";
+      existing.workspaceType = registryEntry.workspaceType;
+      existing.workspacePath = registryEntry.workspacePath;
+      existing.branchName = registryEntry.branchName;
       if (existing.lastActiveAtMs < registryLastActiveMs) {
         existing.lastActiveAtMs = registryLastActiveMs;
       }
@@ -951,6 +1254,21 @@ export class TerminalSessionManager {
 
   private sessionKey(projectId: string, sessionId: string): string {
     return sessionRegistryKey(projectId, sessionId);
+  }
+
+  private runGit(cwd: string, args: string[]): { exitCode: number; stdout: string; stderr: string } {
+    const result = Bun.spawnSync(["git", "-C", cwd, ...args], {
+      cwd: this.options.cwd,
+      env: this.options.env,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+
+    return {
+      exitCode: result.exitCode,
+      stdout: textDecoder.decode(result.stdout).trim(),
+      stderr: textDecoder.decode(result.stderr).trim(),
+    };
   }
 
   private runTmux(args: string[]): { exitCode: number; stdout: string; stderr: string } {

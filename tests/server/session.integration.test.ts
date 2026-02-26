@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync } from "node:fs";
 
 import { isSessionManagerError, TerminalSessionManager } from "../../src/server/terminal-session";
 import type { ServerMessage } from "../../src/shared/protocol";
@@ -24,6 +24,52 @@ function uniqueSessionName(prefix: string): string {
 function createProjectPath(prefix: string): string {
   const path = `/tmp/command-center-project-${prefix}-${uniqueSuffix()}`;
   mkdirSync(path, { recursive: true });
+  return path;
+}
+
+function runGit(cwd: string, args: string[]): { exitCode: number; stdout: string; stderr: string } {
+  const result = Bun.spawnSync(["git", "-C", cwd, ...args], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+
+  return {
+    exitCode: result.exitCode,
+    stdout: new TextDecoder().decode(result.stdout).trim(),
+    stderr: new TextDecoder().decode(result.stderr).trim(),
+  };
+}
+
+function isGitAvailable(): boolean {
+  const result = Bun.spawnSync(["git", "--version"], {
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  return result.exitCode === 0;
+}
+
+function createGitProjectPath(prefix: string): string {
+  const path = createProjectPath(prefix);
+  const initResult = runGit(path, ["init"]);
+  if (initResult.exitCode !== 0) {
+    throw new Error(`git init failed: ${initResult.stderr || "unknown error"}`);
+  }
+
+  const nameResult = runGit(path, ["config", "user.name", "Command Center Test"]);
+  if (nameResult.exitCode !== 0) {
+    throw new Error(`git config user.name failed: ${nameResult.stderr || "unknown error"}`);
+  }
+
+  const emailResult = runGit(path, ["config", "user.email", "command-center@example.com"]);
+  if (emailResult.exitCode !== 0) {
+    throw new Error(`git config user.email failed: ${emailResult.stderr || "unknown error"}`);
+  }
+
+  const commitResult = runGit(path, ["commit", "--allow-empty", "-m", "init"]);
+  if (commitResult.exitCode !== 0) {
+    throw new Error(`git commit failed: ${commitResult.stderr || "unknown error"}`);
+  }
+
   return path;
 }
 
@@ -321,5 +367,83 @@ describe("TerminalSessionManager (tmux, projects)", () => {
 
     const listed = secondManager.listSessions(project.id);
     expect(listed.some((session) => session.id === sessionId)).toBe(true);
+  });
+
+  test("creates and deletes worktree sessions for configured projects", () => {
+    const context = createContext("worktree");
+    if (!context.manager.isTmuxAvailable() || !isGitAvailable()) {
+      return;
+    }
+
+    const repoPath = createGitProjectPath("worktree-repo");
+    const worktreeParentPath = createProjectPath("worktree-parent");
+    context.projectPaths.push(repoPath, worktreeParentPath);
+
+    const project = context.manager.selectProject(repoPath);
+    context.manager.updateProject(project.id, {
+      worktreeEnabled: true,
+      worktreeParentPath,
+    });
+
+    const branchName = `feature-${uniqueSuffix()}`;
+    let created;
+    try {
+      created = context.manager.createSession(project.id, {
+        mode: "worktree",
+        branchName,
+      });
+    } catch (error) {
+      if (shouldSkipTmux(error)) {
+        return;
+      }
+      throw error;
+    }
+
+    expect(created.id).toBe(branchName);
+    expect(created.workspaceType).toBe("worktree");
+    expect(created.branchName).toBe(branchName);
+    expect(existsSync(created.workspacePath)).toBe(true);
+
+    const deleted = context.manager.deleteSession(project.id, branchName);
+    expect(deleted).toBe(true);
+    expect(existsSync(created.workspacePath)).toBe(false);
+
+    const branchLookup = runGit(repoPath, ["branch", "--list", branchName]);
+    expect(branchLookup.exitCode).toBe(0);
+    expect(branchLookup.stdout).toBe("");
+  });
+
+  test("rejects worktree session creation when branch already exists", () => {
+    const context = createContext("worktree-existing-branch");
+    if (!context.manager.isTmuxAvailable() || !isGitAvailable()) {
+      return;
+    }
+
+    const repoPath = createGitProjectPath("worktree-repo-existing");
+    const worktreeParentPath = createProjectPath("worktree-parent-existing");
+    context.projectPaths.push(repoPath, worktreeParentPath);
+
+    const project = context.manager.selectProject(repoPath);
+    context.manager.updateProject(project.id, {
+      worktreeEnabled: true,
+      worktreeParentPath,
+    });
+
+    const branchName = `existing-${uniqueSuffix()}`;
+    const createBranchResult = runGit(repoPath, ["branch", branchName]);
+    expect(createBranchResult.exitCode).toBe(0);
+
+    let thrown: unknown = null;
+    try {
+      context.manager.createSession(project.id, { mode: "worktree", branchName });
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(isSessionManagerError(thrown)).toBe(true);
+    if (!isSessionManagerError(thrown)) {
+      return;
+    }
+    expect(thrown.code).toBe("WORKTREE_BRANCH_EXISTS");
   });
 });

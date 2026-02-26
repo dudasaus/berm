@@ -2,12 +2,16 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
+export type SessionWorkspaceType = "main" | "worktree";
+
 export interface ProjectRegistryEntry {
   id: string;
   name: string;
   path: string;
   createdAt: string;
   lastUsedAt: string;
+  worktreeEnabled: boolean;
+  worktreeParentPath: string | null;
 }
 
 export interface SessionRegistryEntry {
@@ -16,23 +20,33 @@ export interface SessionRegistryEntry {
   tmuxSessionName: string;
   createdAt: string;
   lastActiveAt: string;
+  workspaceType: SessionWorkspaceType;
+  workspacePath: string;
+  branchName: string | null;
 }
 
-interface SessionRegistryFile {
+interface SessionRegistryFileV3 {
   version: number;
   projects: ProjectRegistryEntry[];
   sessions: SessionRegistryEntry[];
 }
 
-interface LegacySessionRegistryEntryV1 {
-  id: string;
-  createdAt: string;
-  lastActiveAt: string;
-}
-
-interface LegacySessionRegistryFileV1 {
-  version: 1;
-  sessions: LegacySessionRegistryEntryV1[];
+interface SessionRegistryFileV2 {
+  version: 2;
+  projects: Array<{
+    id: string;
+    name: string;
+    path: string;
+    createdAt: string;
+    lastUsedAt: string;
+  }>;
+  sessions: Array<{
+    projectId: string;
+    sessionId: string;
+    tmuxSessionName: string;
+    createdAt: string;
+    lastActiveAt: string;
+  }>;
 }
 
 export interface SessionRegistryData {
@@ -40,7 +54,7 @@ export interface SessionRegistryData {
   sessions: Map<string, SessionRegistryEntry>;
 }
 
-const REGISTRY_VERSION = 2;
+const REGISTRY_VERSION = 3;
 
 export function defaultSessionRegistryPath(): string {
   return join(homedir(), ".command-center", "sessions.json");
@@ -48,6 +62,15 @@ export function defaultSessionRegistryPath(): string {
 
 export function sessionRegistryKey(projectId: string, sessionId: string): string {
   return `${projectId}::${sessionId}`;
+}
+
+function normalizeNonEmptyString(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
 }
 
 function normalizeDate(value: string | undefined, fallbackMs: number): string {
@@ -83,10 +106,10 @@ export function loadSessionRegistry(path: string): SessionRegistryData {
   }
 
   const raw = readFileSync(path, "utf8");
-  let parsed: SessionRegistryFile | LegacySessionRegistryFileV1;
+  let parsed: SessionRegistryFileV3 | SessionRegistryFileV2;
 
   try {
-    parsed = JSON.parse(raw) as SessionRegistryFile | LegacySessionRegistryFileV1;
+    parsed = JSON.parse(raw) as SessionRegistryFileV3 | SessionRegistryFileV2;
   } catch {
     const backupPath = `${path}.bak-${Date.now()}`;
     renameSync(path, backupPath);
@@ -95,7 +118,7 @@ export function loadSessionRegistry(path: string): SessionRegistryData {
     return empty;
   }
 
-  if (parsed.version !== REGISTRY_VERSION) {
+  if (parsed.version !== 2 && parsed.version !== REGISTRY_VERSION) {
     const empty = emptyRegistryData();
     saveSessionRegistry(path, empty);
     return empty;
@@ -104,58 +127,75 @@ export function loadSessionRegistry(path: string): SessionRegistryData {
   const projects = new Map<string, ProjectRegistryEntry>();
   const projectEntries = Array.isArray(parsed.projects) ? parsed.projects : [];
   for (const project of projectEntries) {
+    const projectRecord = project as Record<string, unknown>;
+    const projectId = normalizeNonEmptyString(projectRecord?.id);
+    const projectName = normalizeNonEmptyString(projectRecord?.name);
+    const projectPath = normalizeNonEmptyString(projectRecord?.path);
     if (
       !project ||
-      typeof project.id !== "string" ||
-      !project.id.trim() ||
-      typeof project.name !== "string" ||
-      !project.name.trim() ||
-      typeof project.path !== "string" ||
-      !project.path.trim()
+      !projectId ||
+      !projectName ||
+      !projectPath
     ) {
       continue;
     }
 
     const now = Date.now();
-    projects.set(project.id, {
-      id: project.id,
-      name: project.name,
-      path: project.path,
+    projects.set(projectId, {
+      id: projectId,
+      name: projectName,
+      path: projectPath,
       createdAt: normalizeDate(project.createdAt, now),
       lastUsedAt: normalizeDate(project.lastUsedAt, now),
+      worktreeEnabled: projectRecord.worktreeEnabled === true,
+      worktreeParentPath: normalizeNonEmptyString(projectRecord.worktreeParentPath),
     });
   }
 
   const sessions = new Map<string, SessionRegistryEntry>();
   const sessionEntries = Array.isArray(parsed.sessions) ? parsed.sessions : [];
   for (const session of sessionEntries) {
+    const sessionRecord = session as Record<string, unknown>;
+    const projectId = normalizeNonEmptyString(sessionRecord?.projectId);
+    const sessionId = normalizeNonEmptyString(sessionRecord?.sessionId);
+    const tmuxSessionName = normalizeNonEmptyString(sessionRecord?.tmuxSessionName);
     if (
       !session ||
-      typeof session.projectId !== "string" ||
-      !session.projectId.trim() ||
-      typeof session.sessionId !== "string" ||
-      !session.sessionId.trim() ||
-      typeof session.tmuxSessionName !== "string" ||
-      !session.tmuxSessionName.trim()
+      !projectId ||
+      !sessionId ||
+      !tmuxSessionName
     ) {
       continue;
     }
 
-    if (!projects.has(session.projectId)) {
+    const owningProject = projects.get(projectId);
+    if (!owningProject) {
       continue;
     }
 
+    const workspaceType: SessionWorkspaceType = sessionRecord.workspaceType === "worktree" ? "worktree" : "main";
+    const workspacePath = normalizeNonEmptyString(sessionRecord.workspacePath) ?? owningProject.path;
+    const branchName = normalizeNonEmptyString(sessionRecord.branchName);
+
     const now = Date.now();
-    sessions.set(sessionRegistryKey(session.projectId, session.sessionId), {
-      projectId: session.projectId,
-      sessionId: session.sessionId,
-      tmuxSessionName: session.tmuxSessionName,
+    sessions.set(sessionRegistryKey(projectId, sessionId), {
+      projectId,
+      sessionId,
+      tmuxSessionName,
       createdAt: normalizeDate(session.createdAt, now),
       lastActiveAt: normalizeDate(session.lastActiveAt, now),
+      workspaceType,
+      workspacePath,
+      branchName: workspaceType === "worktree" ? branchName : null,
     });
   }
 
-  return { projects, sessions };
+  const loaded: SessionRegistryData = { projects, sessions };
+  if (parsed.version !== REGISTRY_VERSION) {
+    saveSessionRegistry(path, loaded);
+  }
+
+  return loaded;
 }
 
 export function saveSessionRegistry(path: string, data: SessionRegistryData): void {
@@ -164,7 +204,7 @@ export function saveSessionRegistry(path: string, data: SessionRegistryData): vo
     mkdirSync(directory, { recursive: true });
   }
 
-  const payload: SessionRegistryFile = {
+  const payload: SessionRegistryFileV3 = {
     version: REGISTRY_VERSION,
     projects: [...data.projects.values()].sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id)),
     sessions: [...data.sessions.values()].sort((a, b) => {

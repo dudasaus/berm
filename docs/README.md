@@ -10,6 +10,7 @@ Command Center is a Bun-based web terminal application that:
 - Streams terminal I/O over WebSocket
 - Uses TanStack React + xterm.js + shadcn/ui on the frontend
 - Organizes sessions under user-selected projects (filesystem directories)
+- Supports optional per-project git worktree session workflows
 
 A project maps to a real directory path, and each project can contain many terminal sessions.
 
@@ -40,17 +41,20 @@ File: `src/server/terminal-session.ts`
 
 Responsibilities:
 
-- Project CRUD surface used by API layer (`listProjects`, `selectProject`, `deleteProject`)
+- Project CRUD surface used by API layer (`listProjects`, `selectProject`, `updateProject`, `deleteProject`)
 - Project-scoped session lifecycle (`createSession`, `listSessions`, `deleteSession`)
 - WebSocket client attach/detach and message handling
 - tmux reconciliation and availability/error management
+- git worktree creation/removal for worktree-mode sessions
 
 Notable behavior:
 
 - Session names are unique per project
 - Same session name can exist in different projects
-- Internal tmux session name format: `<projectId>__<sessionId>`
+- Worktree sessions use branch name as session ID
+- Internal tmux names are derived from `<projectId>__<sessionId>` with sanitization/hash for branch-style IDs
 - Project delete removes all of that project's sessions and kills their tmux sessions
+- Worktree session delete also removes the worktree directory and branch (non-force, safety-first)
 
 ### 3. Session registry
 
@@ -60,17 +64,22 @@ Stored in default path:
 
 - `~/.command-center/sessions.json`
 
-Current schema (version 2):
+Current schema (version 3):
 
 - `projects[]`
-- `sessions[]` where each session references `projectId` and `tmuxSessionName`
+  - includes `worktreeEnabled` and `worktreeParentPath`
+- `sessions[]`
+  - includes `projectId`, `tmuxSessionName`, and workspace metadata:
+    - `workspaceType` (`main` or `worktree`)
+    - `workspacePath`
+    - `branchName` (for worktree sessions)
 
 Properties:
 
 - Atomic writes via temp file + rename
 - Auto-create file/directory if missing
 - Invalid JSON backup behavior (`.bak-<timestamp>`)
-- Legacy schema is cleared and rewritten as empty v2 (no migration of old sessions)
+- v2 registry data is loaded with defaults for new fields and then saved in v3 format
 
 ## Project Model
 
@@ -79,6 +88,9 @@ A project is defined by:
 - Canonical absolute directory path (`realpath`)
 - Deterministic ID (`proj_<sha1-prefix>`)
 - Name derived from directory basename
+- Worktree settings:
+  - `worktreeEnabled` (manual toggle)
+  - `worktreeParentPath` (absolute existing directory)
 
 Validation rules for selection:
 
@@ -96,13 +108,16 @@ Validation rules for selection:
 
 - `GET /api/projects`
 - `POST /api/projects/select` with `{ path }`
+- `PATCH /api/projects/:id` with optional `{ worktreeEnabled, worktreeParentPath }`
 - `POST /api/projects/pick` (native folder picker on macOS)
 - `DELETE /api/projects/:id` (deletes project + all sessions)
 
 ### Sessions (project-scoped)
 
 - `GET /api/projects/:projectId/sessions`
-- `POST /api/projects/:projectId/sessions` with optional `{ name }`
+- `POST /api/projects/:projectId/sessions`
+  - Main session: `{ mode: "main", name? }`
+  - Worktree session: `{ mode: "worktree", branchName }`
 - `GET /api/projects/:projectId/sessions/:id`
 - `DELETE /api/projects/:projectId/sessions/:id`
 
@@ -135,12 +150,18 @@ Responsibilities:
 - Manages selected project + selected session
 - Manages per-project manual session ordering
 - Renders left control pane and right terminal pane
-- Exposes project actions (pick, enter path, delete)
+- Exposes project actions (pick, enter path, settings, delete)
+- Includes a modal for per-project worktree settings
 
 Left pane structure:
 
 - **Project Management** (collapsible)
 - **Session Management** (below project section)
+
+Session creation menu behavior:
+
+- Always offers main-session creation (auto/custom name)
+- For worktree-enabled projects, also offers create in a new worktree (manual branch name)
 
 ### 2. TerminalPane
 
@@ -168,7 +189,15 @@ This keeps ordering and selection stable while allowing independent state per pr
 
 - tmux socket namespace defaults to `command-center`
 - All tmux commands run as `tmux -L <socket> ...`
-- Session creation uses selected project path as tmux cwd (`-c <project.path>`)
+- Session creation uses workspace path as tmux cwd (`-c <workspacePath>`)
+
+Worktree mode commands:
+
+- Create worktree session from current project HEAD:
+  - `git -C <project.path> worktree add -b <branch> <worktreePath>`
+- Delete worktree session resources:
+  - `git -C <project.path> worktree remove <worktreePath>`
+  - `git -C <project.path> branch -d <branch>`
 
 ## Native Folder Picker
 

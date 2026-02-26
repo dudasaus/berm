@@ -1,6 +1,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ChevronDown, ChevronUp, Command, Eraser, FolderOpen, Plus, RefreshCw, RotateCcw, Trash2 } from "lucide-react";
+import {
+  ChevronDown,
+  ChevronUp,
+  Command,
+  Eraser,
+  FolderOpen,
+  Plus,
+  RefreshCw,
+  RotateCcw,
+  Settings2,
+  Trash2,
+} from "lucide-react";
 import { toast } from "sonner";
 
 import { Badge } from "../ui/badge";
@@ -42,6 +53,8 @@ type ProjectMetadata = {
   path: string;
   createdAt: string;
   lastUsedAt: string;
+  worktreeEnabled: boolean;
+  worktreeParentPath: string | null;
 };
 
 type SessionMetadata = {
@@ -55,6 +68,9 @@ type SessionMetadata = {
   createdAt: string;
   lastActiveAt: string;
   attachedClients: number;
+  workspaceType: "main" | "worktree";
+  workspacePath: string;
+  branchName: string | null;
 };
 
 async function fetchHealth() {
@@ -129,13 +145,21 @@ async function fetchSessions(projectId: string) {
   return payload.sessions ?? [];
 }
 
-async function createSession(request: { projectId: string; name?: string }) {
+async function createSession(
+  request:
+    | { projectId: string; mode?: "main"; name?: string }
+    | { projectId: string; mode: "worktree"; branchName: string },
+) {
   const response = await fetch(`/api/projects/${encodeURIComponent(request.projectId)}/sessions`, {
     method: "POST",
     headers: {
       "content-type": "application/json",
     },
-    body: JSON.stringify({ name: request.name }),
+    body: JSON.stringify(
+      request.mode === "worktree"
+        ? { mode: "worktree", branchName: request.branchName }
+        : { mode: "main", name: request.name },
+    ),
   });
 
   const payload = (await response.json()) as SessionMetadata | { error?: string };
@@ -144,6 +168,30 @@ async function createSession(request: { projectId: string; name?: string }) {
   }
 
   return payload as SessionMetadata;
+}
+
+async function updateProject(request: {
+  projectId: string;
+  worktreeEnabled?: boolean;
+  worktreeParentPath?: string | null;
+}) {
+  const response = await fetch(`/api/projects/${encodeURIComponent(request.projectId)}`, {
+    method: "PATCH",
+    headers: {
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      worktreeEnabled: request.worktreeEnabled,
+      worktreeParentPath: request.worktreeParentPath,
+    }),
+  });
+
+  const payload = (await response.json()) as ProjectMetadata | { error?: string };
+  if (!response.ok) {
+    throw new Error("error" in payload && payload.error ? payload.error : `update project failed with ${response.status}`);
+  }
+
+  return payload as ProjectMetadata;
 }
 
 async function deleteSession(request: { projectId: string; sessionId: string }) {
@@ -246,6 +294,16 @@ function promptForOptionalSessionName(): string | undefined | null {
   return trimmed || undefined;
 }
 
+function promptForBranchName(): string | null {
+  const provided = window.prompt("Enter a branch name for the new worktree session:");
+  if (provided === null) {
+    return null;
+  }
+
+  const trimmed = provided.trim();
+  return trimmed || null;
+}
+
 function promptForProjectPath(): string | null {
   const provided = window.prompt("Enter an absolute project directory path:");
   if (provided === null) {
@@ -266,6 +324,9 @@ export function TerminalView() {
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [sessionOrder, setSessionOrder] = useState<string[]>([]);
   const [isProjectSectionOpen, setIsProjectSectionOpen] = useState(true);
+  const [isProjectSettingsOpen, setIsProjectSettingsOpen] = useState(false);
+  const [projectSettingsWorktreeEnabled, setProjectSettingsWorktreeEnabled] = useState(false);
+  const [projectSettingsParentPath, setProjectSettingsParentPath] = useState("");
   const [isStackedLayout, setIsStackedLayout] = useState(() => {
     if (typeof window === "undefined") {
       return false;
@@ -379,6 +440,19 @@ export function TerminalView() {
     },
   });
 
+  const updateProjectMutation = useMutation({
+    mutationFn: updateProject,
+    onSuccess: (project) => {
+      toast.success(`Updated project ${project.name}`);
+      void queryClient.invalidateQueries({ queryKey: ["projects"] });
+      void queryClient.invalidateQueries({ queryKey: ["sessions", project.id] });
+      setIsProjectSettingsOpen(false);
+    },
+    onError: (error) => {
+      toast.error(error instanceof Error ? error.message : String(error));
+    },
+  });
+
   const createSessionMutation = useMutation({
     mutationFn: createSession,
     onSuccess: (createdSession) => {
@@ -416,6 +490,15 @@ export function TerminalView() {
     () => projects.find((project) => project.id === selectedProjectId) ?? null,
     [projects, selectedProjectId],
   );
+
+  useEffect(() => {
+    if (!selectedProject) {
+      return;
+    }
+
+    setProjectSettingsWorktreeEnabled(selectedProject.worktreeEnabled);
+    setProjectSettingsParentPath(selectedProject.worktreeParentPath ?? "");
+  }, [selectedProject]);
 
   useEffect(() => {
     if (projects.length === 0) {
@@ -557,16 +640,53 @@ export function TerminalView() {
     deleteProjectMutation.mutate(selectedProject.id);
   };
 
-  const handleCreateAutoSession = () => {
+  const handleOpenProjectSettings = () => {
+    if (!selectedProject) {
+      toast.warning("Select a project first");
+      return;
+    }
+
+    setProjectSettingsWorktreeEnabled(selectedProject.worktreeEnabled);
+    setProjectSettingsParentPath(selectedProject.worktreeParentPath ?? "");
+    setIsProjectSettingsOpen(true);
+  };
+
+  const handlePickWorktreeParentPath = async () => {
+    try {
+      const path = await pickProjectPath();
+      setProjectSettingsParentPath(path);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.startsWith("PROJECT_PICK_CANCELLED")) {
+        return;
+      }
+      toast.error(message);
+    }
+  };
+
+  const handleSaveProjectSettings = () => {
+    if (!selectedProject) {
+      return;
+    }
+
+    const parentPath = projectSettingsParentPath.trim();
+    updateProjectMutation.mutate({
+      projectId: selectedProject.id,
+      worktreeEnabled: projectSettingsWorktreeEnabled,
+      worktreeParentPath: parentPath ? parentPath : null,
+    });
+  };
+
+  const handleCreateMainAutoSession = () => {
     if (!selectedProjectId) {
       toast.warning("Select a project first");
       return;
     }
 
-    createSessionMutation.mutate({ projectId: selectedProjectId });
+    createSessionMutation.mutate({ projectId: selectedProjectId, mode: "main" });
   };
 
-  const handleCreateNamedSession = () => {
+  const handleCreateMainNamedSession = () => {
     if (!selectedProjectId) {
       toast.warning("Select a project first");
       return;
@@ -577,7 +697,31 @@ export function TerminalView() {
       return;
     }
 
-    createSessionMutation.mutate({ projectId: selectedProjectId, name: desiredName });
+    createSessionMutation.mutate({ projectId: selectedProjectId, mode: "main", name: desiredName });
+  };
+
+  const handleCreateWorktreeSession = () => {
+    if (!selectedProjectId || !selectedProject) {
+      toast.warning("Select a project first");
+      return;
+    }
+
+    if (!selectedProject.worktreeEnabled) {
+      toast.warning("Enable worktree mode in project settings first");
+      return;
+    }
+
+    if (!selectedProject.worktreeParentPath) {
+      toast.warning("Set a worktree parent path in project settings first");
+      return;
+    }
+
+    const branchName = promptForBranchName();
+    if (!branchName) {
+      return;
+    }
+
+    createSessionMutation.mutate({ projectId: selectedProjectId, mode: "worktree", branchName });
   };
 
   const handleDeleteSession = (sessionId: string) => {
@@ -709,6 +853,15 @@ export function TerminalView() {
                         </Button>
                         <Button
                           size="sm"
+                          variant="outline"
+                          onClick={handleOpenProjectSettings}
+                          disabled={!selectedProject}
+                        >
+                          <Settings2 className="h-4 w-4" />
+                          Settings
+                        </Button>
+                        <Button
+                          size="sm"
                           variant="ghost"
                           onClick={handleDeleteProject}
                           disabled={!selectedProject || deleteProjectMutation.isPending}
@@ -717,6 +870,17 @@ export function TerminalView() {
                           Delete
                         </Button>
                       </div>
+
+                      {selectedProject ? (
+                        <div className="rounded-sm border border-border/70 bg-card px-2 py-1.5">
+                          <p className="font-mono text-[11px] text-muted-foreground">
+                            worktree mode {selectedProject.worktreeEnabled ? "enabled" : "disabled"}
+                          </p>
+                          <p className="truncate font-mono text-[11px] text-muted-foreground">
+                            parent {selectedProject.worktreeParentPath ?? "not set"}
+                          </p>
+                        </div>
+                      ) : null}
 
                       <div className="space-y-1.5">
                         <p className="font-mono text-[11px] uppercase tracking-wide text-muted-foreground">Recent projects</p>
@@ -771,8 +935,16 @@ export function TerminalView() {
                       <DropdownMenuContent align="end" className="w-56">
                         <DropdownMenuLabel>Create Session</DropdownMenuLabel>
                         <DropdownMenuSeparator />
-                        <DropdownMenuItem onSelect={handleCreateAutoSession}>Auto name</DropdownMenuItem>
-                        <DropdownMenuItem onSelect={handleCreateNamedSession}>Custom name</DropdownMenuItem>
+                        <DropdownMenuItem onSelect={handleCreateMainAutoSession}>In main (auto name)</DropdownMenuItem>
+                        <DropdownMenuItem onSelect={handleCreateMainNamedSession}>In main (custom name)</DropdownMenuItem>
+                        {selectedProject?.worktreeEnabled ? (
+                          <DropdownMenuItem
+                            onSelect={handleCreateWorktreeSession}
+                            disabled={!selectedProject.worktreeParentPath}
+                          >
+                            In new worktree branch
+                          </DropdownMenuItem>
+                        ) : null}
                       </DropdownMenuContent>
                     </DropdownMenu>
                   </div>
@@ -788,7 +960,7 @@ export function TerminalView() {
                   ) : sessions.length === 0 ? (
                     <div className="rounded-md border border-dashed border-border p-3 text-sm text-muted-foreground">
                       <p>No sessions yet in this project.</p>
-                      <Button size="sm" variant="outline" className="mt-2" onClick={handleCreateAutoSession}>
+                      <Button size="sm" variant="outline" className="mt-2" onClick={handleCreateMainAutoSession}>
                         <Plus className="h-4 w-4" />
                         Create first session
                       </Button>
@@ -818,6 +990,17 @@ export function TerminalView() {
                                 <p className="font-mono text-[11px] text-muted-foreground">
                                   active {new Date(session.lastActiveAt).toLocaleTimeString()} · clients {session.attachedClients}
                                 </p>
+                                <div className="mt-1 flex items-center gap-1">
+                                  <Badge
+                                    variant={session.workspaceType === "worktree" ? "secondary" : "outline"}
+                                    className="font-mono text-[10px] uppercase tracking-wide"
+                                  >
+                                    {session.workspaceType}
+                                  </Badge>
+                                  <span className="truncate font-mono text-[10px] text-muted-foreground">
+                                    {session.workspaceType === "worktree" ? session.workspacePath : "project root"}
+                                  </span>
+                                </div>
                               </button>
 
                               <div className="flex items-center">
@@ -991,7 +1174,7 @@ export function TerminalView() {
                   <div className="flex h-full items-center justify-center rounded-md border border-border/30 bg-[#1f1811] text-center text-sm text-muted-foreground">
                     <div className="space-y-2">
                       <p>{selectedProjectId ? "No session selected." : "No project selected."}</p>
-                      <Button size="sm" variant="secondary" onClick={selectedProjectId ? handleCreateAutoSession : handlePickProject}>
+                      <Button size="sm" variant="secondary" onClick={selectedProjectId ? handleCreateMainAutoSession : handlePickProject}>
                         {selectedProjectId ? <Plus className="h-4 w-4" /> : <FolderOpen className="h-4 w-4" />}
                         {selectedProjectId ? "Create session" : "Pick project"}
                       </Button>
@@ -1003,6 +1186,87 @@ export function TerminalView() {
           </ResizablePanel>
         </ResizablePanelGroup>
       </main>
+
+      {isProjectSettingsOpen && selectedProject ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4">
+          <Card className="w-full max-w-xl border-border/80 bg-card shadow-xl">
+            <CardHeader className="space-y-1 pb-3">
+              <CardTitle className="text-base">Project Settings</CardTitle>
+              <CardDescription className="font-mono text-xs">{selectedProject.name}</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <label className="flex items-center gap-2 rounded-md border border-border p-2">
+                <input
+                  type="checkbox"
+                  checked={projectSettingsWorktreeEnabled}
+                  onChange={(event) => {
+                    setProjectSettingsWorktreeEnabled(event.currentTarget.checked);
+                  }}
+                />
+                <span className="font-mono text-xs">Enable git worktree session mode for this project</span>
+              </label>
+
+              <div className="space-y-1.5">
+                <p className="font-mono text-[11px] uppercase tracking-wide text-muted-foreground">Worktree parent directory</p>
+                <input
+                  type="text"
+                  value={projectSettingsParentPath}
+                  onChange={(event) => {
+                    setProjectSettingsParentPath(event.currentTarget.value);
+                  }}
+                  placeholder="/absolute/path/for/worktrees"
+                  className="w-full rounded-md border border-border bg-background px-2 py-1.5 font-mono text-xs outline-none focus:border-primary/60"
+                />
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    onClick={handlePickWorktreeParentPath}
+                    disabled={updateProjectMutation.isPending}
+                  >
+                    <FolderOpen className="h-4 w-4" />
+                    Pick folder
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => {
+                      setProjectSettingsParentPath("");
+                    }}
+                    disabled={updateProjectMutation.isPending}
+                  >
+                    Clear
+                  </Button>
+                </div>
+              </div>
+
+              <div className="flex justify-end gap-2">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => {
+                    setIsProjectSettingsOpen(false);
+                  }}
+                  disabled={updateProjectMutation.isPending}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  onClick={handleSaveProjectSettings}
+                  disabled={updateProjectMutation.isPending}
+                >
+                  Save
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      ) : null}
     </TooltipProvider>
   );
 }

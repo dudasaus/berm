@@ -8,6 +8,13 @@ Web terminal app powered by Bun PTY + zsh on the backend and TanStack React + xt
 - Use the `Project` control in the UI to select an existing absolute path.
 - Recent projects are persisted and reusable.
 - Deleting a project from the UI deletes all sessions in that project.
+- Projects can optionally enable git worktree mode.
+- In worktree mode, you can create sessions either in the main project root or in a new worktree branch.
+- Worktree sessions are persisted and cleaned up (worktree + branch) when deleted.
+
+## Docs
+
+- Architecture and API details: `docs/README.md`
 
 ## Run
 

@@ -1,7 +1,9 @@
 import app from "../web/index.html";
 import { serializeMessage, type ServerMessage } from "../shared/protocol";
 import {
+  type CreateSessionRequest,
   TerminalSessionManager,
+  type UpdateProjectRequest,
   isSessionManagerError,
   type SessionClient,
 } from "./terminal-session";
@@ -111,6 +113,15 @@ export function createServer(port = Number(Bun.env.PORT ?? 3000)) {
         },
       },
       "/api/projects/:id": {
+        PATCH: async (req: Bun.BunRequest<"/api/projects/:id">) => {
+          try {
+            const body = (await req.json().catch(() => ({}))) as UpdateProjectRequest;
+            const project = manager.updateProject(req.params.id, body);
+            return Response.json(project);
+          } catch (error) {
+            return errorResponse(error);
+          }
+        },
         DELETE: (req: Bun.BunRequest<"/api/projects/:id">) => {
           try {
             const deleted = manager.deleteProject(req.params.id);
@@ -140,9 +151,28 @@ export function createServer(port = Number(Bun.env.PORT ?? 3000)) {
         },
         POST: async (req: Bun.BunRequest<"/api/projects/:projectId/sessions">) => {
           try {
-            const body = (await req.json().catch(() => ({}))) as { name?: string };
-            const name = typeof body.name === "string" ? body.name : undefined;
-            const session = manager.createSession(req.params.projectId, name);
+            const body = (await req.json().catch(() => ({}))) as {
+              mode?: unknown;
+              name?: unknown;
+              branchName?: unknown;
+            };
+
+            let request: CreateSessionRequest | undefined;
+            if (body.mode === "worktree") {
+              request = {
+                mode: "worktree",
+                branchName: typeof body.branchName === "string" ? body.branchName : "",
+              };
+            } else if (typeof body.mode === "undefined" || body.mode === "main") {
+              request = {
+                mode: "main",
+                name: typeof body.name === "string" ? body.name : undefined,
+              };
+            } else {
+              request = body as CreateSessionRequest;
+            }
+
+            const session = manager.createSession(req.params.projectId, request);
             return Response.json(session, { status: 201 });
           } catch (error) {
             return errorResponse(error);
