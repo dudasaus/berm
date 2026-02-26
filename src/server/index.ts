@@ -2,6 +2,8 @@ import app from "../web/index.html";
 import { serializeMessage, type ServerMessage } from "../shared/protocol";
 import {
   type CreateSessionRequest,
+  type ProjectMetadata,
+  type SessionMetadata,
   TerminalSessionManager,
   type UpdateProjectRequest,
   isSessionManagerError,
@@ -14,10 +16,46 @@ type WebSocketData = {
   clientId: string;
 };
 
-const manager = new TerminalSessionManager({
-  tmuxSocketName: Bun.env.COMMAND_CENTER_TMUX_SOCKET ?? undefined,
-  registryPath: Bun.env.COMMAND_CENTER_REGISTRY_PATH ?? undefined,
-});
+export interface SessionManagerLike {
+  listProjects(): ProjectMetadata[];
+  selectProject(path: string): ProjectMetadata;
+  updateProject(projectId: string, input: UpdateProjectRequest): ProjectMetadata;
+  deleteProject(projectId: string): boolean;
+  getProject(projectId: string): ProjectMetadata | null;
+  listSessions(projectId: string): SessionMetadata[];
+  createSession(projectId: string, request?: CreateSessionRequest): SessionMetadata;
+  deleteSession(projectId: string, sessionId: string): boolean;
+  hasSession(projectId: string, sessionId: string): boolean;
+  attachClient(projectId: string, sessionId: string, client: SessionClient): SessionMetadata | null;
+  handleClientMessage(projectId: string, sessionId: string, clientId: string, rawMessage: unknown): void;
+  detachClient(projectId: string, sessionId: string, clientId: string): void;
+  getSessionMetadata(projectId: string, sessionId: string): SessionMetadata | null;
+  shutdown(): Promise<void>;
+}
+
+interface CreateServerOptions {
+  manager?: SessionManagerLike;
+  pickProjectDirectory?: () => Response;
+  port?: number;
+}
+
+export interface ServerConfig {
+  routes: Record<string, unknown>;
+  fetch: (req: Request, serverRef: Pick<Bun.Server<WebSocketData>, "upgrade">) => Response | undefined;
+  websocket: {
+    data: WebSocketData;
+    open: (ws: Bun.ServerWebSocket<WebSocketData>) => void;
+    message: (ws: Bun.ServerWebSocket<WebSocketData>, message: string | Buffer<ArrayBuffer>) => void;
+    close: (ws: Bun.ServerWebSocket<WebSocketData>) => void;
+  };
+}
+
+function createDefaultManager(): TerminalSessionManager {
+  return new TerminalSessionManager({
+    tmuxSocketName: Bun.env.COMMAND_CENTER_TMUX_SOCKET ?? undefined,
+    registryPath: Bun.env.COMMAND_CENTER_REGISTRY_PATH ?? undefined,
+  });
+}
 
 export function buildHealthResponse(): Response {
   return Response.json({
@@ -27,7 +65,7 @@ export function buildHealthResponse(): Response {
 }
 
 export function buildSessionResponse(
-  sessionManager: TerminalSessionManager,
+  sessionManager: SessionManagerLike,
   projectId: string,
   sessionId: string,
 ): Response {
@@ -89,9 +127,11 @@ function pickProjectDirectory(): Response {
   return Response.json({ path: stdout });
 }
 
-export function createServer(port = Number(Bun.env.PORT ?? 3000)) {
-  const server = Bun.serve<WebSocketData>({
-    port,
+export function createServerConfig(
+  manager: SessionManagerLike,
+  openProjectPicker: () => Response = pickProjectDirectory,
+): ServerConfig {
+  return {
     routes: {
       "/": app,
       "/api/health": () => buildHealthResponse(),
@@ -137,7 +177,7 @@ export function createServer(port = Number(Bun.env.PORT ?? 3000)) {
       },
       "/api/projects/pick": {
         POST: () => {
-          return pickProjectDirectory();
+          return openProjectPicker();
         },
       },
       "/api/projects/:projectId/sessions": {
@@ -196,7 +236,7 @@ export function createServer(port = Number(Bun.env.PORT ?? 3000)) {
         },
       },
     },
-    fetch(req, serverRef) {
+    fetch(req: Request, serverRef: Pick<Bun.Server<WebSocketData>, "upgrade">) {
       const url = new URL(req.url);
       if (url.pathname !== "/ws/terminal") {
         return new Response("Not Found", { status: 404 });
@@ -232,7 +272,7 @@ export function createServer(port = Number(Bun.env.PORT ?? 3000)) {
     },
     websocket: {
       data: {} as WebSocketData,
-      open(ws) {
+      open(ws: Bun.ServerWebSocket<WebSocketData>) {
         const client: SessionClient = {
           id: ws.data.clientId,
           send(message: ServerMessage) {
@@ -249,11 +289,39 @@ export function createServer(port = Number(Bun.env.PORT ?? 3000)) {
           ws.close(4004, "Session not found");
         }
       },
-      message(ws, message) {
+      message(ws: Bun.ServerWebSocket<WebSocketData>, message: string | Buffer<ArrayBuffer>) {
         manager.handleClientMessage(ws.data.projectId, ws.data.sessionId, ws.data.clientId, message);
       },
-      close(ws) {
+      close(ws: Bun.ServerWebSocket<WebSocketData>) {
         manager.detachClient(ws.data.projectId, ws.data.sessionId, ws.data.clientId);
+      },
+    },
+  };
+}
+
+export function createServer(options: number | CreateServerOptions = {}) {
+  const normalized: CreateServerOptions = typeof options === "number" ? { port: options } : options;
+  const port = normalized.port ?? Number(Bun.env.PORT ?? 3000);
+  const manager = normalized.manager ?? createDefaultManager();
+  const openProjectPicker = normalized.pickProjectDirectory ?? pickProjectDirectory;
+  const config = createServerConfig(manager, openProjectPicker);
+
+  const server = Bun.serve<WebSocketData>({
+    port,
+    routes: config.routes as Bun.ServeOptions<WebSocketData>["routes"],
+    fetch(req, serverRef) {
+      return config.fetch(req, serverRef);
+    },
+    websocket: {
+      data: config.websocket.data,
+      open(ws) {
+        config.websocket.open(ws);
+      },
+      message(ws, message) {
+        config.websocket.message(ws, message);
+      },
+      close(ws) {
+        config.websocket.close(ws);
       },
     },
   });
