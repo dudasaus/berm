@@ -4,7 +4,6 @@ import {
   ChevronDown,
   ChevronUp,
   Command,
-  Eraser,
   FolderOpen,
   Plus,
   RefreshCw,
@@ -1339,18 +1338,6 @@ export function TerminalView() {
                         <TooltipContent>Reconnect WebSocket to selected session</TooltipContent>
                       </Tooltip>
 
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={() => {
-                          terminalRef.current?.clear();
-                          toast.message("Terminal buffer cleared");
-                        }}
-                        disabled={!selectedSession}
-                      >
-                        <Eraser className="h-4 w-4" />
-                        Clear
-                      </Button>
                     </div>
 
                     <DropdownMenu>
