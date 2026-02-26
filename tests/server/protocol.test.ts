@@ -23,8 +23,14 @@ describe("protocol parsing", () => {
     expect(badResize.ok).toBe(false);
   });
 
-  test("parses server output message", () => {
+  test("parses server message variants", () => {
     const output = parseServerMessage('{"type":"output","data":"hello"}');
     expect(output.ok).toBe(true);
+
+    const deleted = parseServerMessage({ type: "session_deleted", sessionId: "session-001" });
+    expect(deleted.ok).toBe(true);
+
+    const missing = parseServerMessage({ type: "session_not_found", sessionId: "session-404" });
+    expect(missing.ok).toBe(true);
   });
 });

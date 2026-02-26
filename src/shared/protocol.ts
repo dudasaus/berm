@@ -11,7 +11,9 @@ export type ServerMessage =
   | { type: "status"; state: TerminalStatusState }
   | { type: "exit"; code: number | null; signal: string | null }
   | { type: "error"; message: string }
-  | { type: "pong"; ts: number };
+  | { type: "pong"; ts: number }
+  | { type: "session_deleted"; sessionId: string }
+  | { type: "session_not_found"; sessionId: string };
 
 type ParseSuccess<T> = { ok: true; value: T };
 type ParseFailure = { ok: false; error: string };
@@ -133,6 +135,18 @@ function validateServerMessage(value: unknown): ParseResult<ServerMessage> {
         return { ok: false, error: "pong.ts must be a finite number" };
       }
       return { ok: true, value: { type: "pong", ts: value.ts } };
+
+    case "session_deleted":
+      if (typeof value.sessionId !== "string") {
+        return { ok: false, error: "session_deleted.sessionId must be a string" };
+      }
+      return { ok: true, value: { type: "session_deleted", sessionId: value.sessionId } };
+
+    case "session_not_found":
+      if (typeof value.sessionId !== "string") {
+        return { ok: false, error: "session_not_found.sessionId must be a string" };
+      }
+      return { ok: true, value: { type: "session_not_found", sessionId: value.sessionId } };
 
     default:
       return { ok: false, error: `Unknown server message type: ${value.type}` };

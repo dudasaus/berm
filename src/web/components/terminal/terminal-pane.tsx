@@ -7,6 +7,7 @@ import { parseServerMessage, serializeMessage, type ClientMessage, type Terminal
 const TERMINAL_BG = "#1f1811";
 
 export type TerminalConnectionState = "connecting" | "connected" | "disconnected";
+export type SessionUnavailableReason = "deleted" | "missing";
 
 export interface TerminalPaneHandle {
   clear: () => void;
@@ -18,6 +19,7 @@ interface TerminalPaneProps {
   sessionId: string;
   onConnectionStateChange: (state: TerminalConnectionState) => void;
   onTerminalStateChange: (state: TerminalStatusState) => void;
+  onSessionUnavailable: (sessionId: string, reason: SessionUnavailableReason) => void;
 }
 
 function wsUrl(sessionId: string) {
@@ -26,7 +28,7 @@ function wsUrl(sessionId: string) {
 }
 
 export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
-  ({ sessionId, onConnectionStateChange, onTerminalStateChange }, ref) => {
+  ({ sessionId, onConnectionStateChange, onTerminalStateChange, onSessionUnavailable }, ref) => {
     const mountRef = useRef<HTMLDivElement | null>(null);
     const terminalRef = useRef<Terminal | null>(null);
     const fitAddonRef = useRef<FitAddon | null>(null);
@@ -36,8 +38,23 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
     const resizeObserverRef = useRef<ResizeObserver | null>(null);
     const resizeRafRef = useRef<number | null>(null);
     const disposedRef = useRef(false);
+    const onConnectionStateChangeRef = useRef(onConnectionStateChange);
+    const onTerminalStateChangeRef = useRef(onTerminalStateChange);
+    const onSessionUnavailableRef = useRef(onSessionUnavailable);
 
     const desiredStateRef = useRef<"connected" | "closed">("connected");
+
+    useEffect(() => {
+      onConnectionStateChangeRef.current = onConnectionStateChange;
+    }, [onConnectionStateChange]);
+
+    useEffect(() => {
+      onTerminalStateChangeRef.current = onTerminalStateChange;
+    }, [onTerminalStateChange]);
+
+    useEffect(() => {
+      onSessionUnavailableRef.current = onSessionUnavailable;
+    }, [onSessionUnavailable]);
 
     const sendMessage = useCallback((message: ClientMessage) => {
       const socket = socketRef.current;
@@ -99,13 +116,13 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
 
       const nextSocket = new WebSocket(wsUrl(sessionId));
       socketRef.current = nextSocket;
-      onConnectionStateChange("connecting");
+      onConnectionStateChangeRef.current("connecting");
 
       nextSocket.onopen = () => {
         if (socketRef.current !== nextSocket) {
           return;
         }
-        onConnectionStateChange("connected");
+        onConnectionStateChangeRef.current("connected");
         safeFitAndResize();
 
         pingTimerRef.current = window.setInterval(() => {
@@ -130,7 +147,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
         }
 
         if (message.type === "status") {
-          onTerminalStateChange(message.state);
+          onTerminalStateChangeRef.current(message.state);
           return;
         }
 
@@ -141,6 +158,22 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
 
         if (message.type === "error") {
           terminalRef.current?.writeln(`\r\n[server-error] ${message.message}`);
+          return;
+        }
+
+        if (message.type === "session_deleted") {
+          terminalRef.current?.writeln(`\r\n[session-deleted] ${message.sessionId}`);
+          desiredStateRef.current = "closed";
+          onSessionUnavailableRef.current(message.sessionId, "deleted");
+          nextSocket.close(1000, "Session deleted");
+          return;
+        }
+
+        if (message.type === "session_not_found") {
+          terminalRef.current?.writeln(`\r\n[session-missing] ${message.sessionId}`);
+          desiredStateRef.current = "closed";
+          onSessionUnavailableRef.current(message.sessionId, "missing");
+          nextSocket.close(1000, "Session not found");
         }
       };
 
@@ -154,7 +187,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
           pingTimerRef.current = null;
         }
 
-        onConnectionStateChange("disconnected");
+        onConnectionStateChangeRef.current("disconnected");
 
         if (desiredStateRef.current === "closed") {
           return;
@@ -164,7 +197,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
           reconnect();
         }, 1_200);
       };
-    }, [onConnectionStateChange, onTerminalStateChange, safeFitAndResize, sendMessage, sessionId]);
+    }, [safeFitAndResize, sendMessage, sessionId]);
 
     useImperativeHandle(
       ref,
@@ -217,55 +250,80 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
       disposedRef.current = false;
       desiredStateRef.current = "connected";
 
-      const mount = mountRef.current;
-      if (!mount) {
-        return;
-      }
-
       const terminal = new Terminal(terminalOptions);
       const fitAddon = new FitAddon();
       terminal.loadAddon(fitAddon);
-      terminal.open(mount);
-      terminalRef.current = terminal;
-      fitAddonRef.current = fitAddon;
-      safeFitAndResize();
-
-      const onDataDispose = terminal.onData((data) => {
-        sendMessage({ type: "input", data });
-      });
-
-      resizeObserverRef.current = new ResizeObserver(() => {
-        if (resizeRafRef.current) {
-          window.cancelAnimationFrame(resizeRafRef.current);
-        }
-        resizeRafRef.current = window.requestAnimationFrame(() => {
-          safeFitAndResize();
-        });
-      });
-      resizeObserverRef.current.observe(mount);
-
+      let openRafId: number | null = null;
+      let onDataDispose: { dispose: () => void } | undefined;
       let removeFontListeners: (() => void) | undefined;
-      if ("fonts" in document) {
-        const fonts = document.fonts;
-        const onFontsChanged = () => {
-          safeFitAndResize();
-        };
+      let initialized = false;
 
-        void fonts.ready.then(onFontsChanged);
-        fonts.addEventListener("loadingdone", onFontsChanged);
-        fonts.addEventListener("loadingerror", onFontsChanged);
+      const initializeTerminal = () => {
+        if (disposedRef.current) {
+          return;
+        }
 
-        removeFontListeners = () => {
-          fonts.removeEventListener("loadingdone", onFontsChanged);
-          fonts.removeEventListener("loadingerror", onFontsChanged);
-        };
-      }
+        const mount = mountRef.current;
+        if (!mount || !mount.isConnected || mount.clientWidth < 8 || mount.clientHeight < 8) {
+          openRafId = window.requestAnimationFrame(initializeTerminal);
+          return;
+        }
 
-      reconnect();
+        try {
+          terminal.open(mount);
+        } catch {
+          openRafId = window.requestAnimationFrame(initializeTerminal);
+          return;
+        }
+
+        terminalRef.current = terminal;
+        fitAddonRef.current = fitAddon;
+        safeFitAndResize();
+
+        onDataDispose = terminal.onData((data) => {
+          sendMessage({ type: "input", data });
+        });
+
+        resizeObserverRef.current = new ResizeObserver(() => {
+          if (resizeRafRef.current) {
+            window.cancelAnimationFrame(resizeRafRef.current);
+          }
+          resizeRafRef.current = window.requestAnimationFrame(() => {
+            safeFitAndResize();
+          });
+        });
+        resizeObserverRef.current.observe(mount);
+
+        if ("fonts" in document) {
+          const fonts = document.fonts;
+          const onFontsChanged = () => {
+            safeFitAndResize();
+          };
+
+          void fonts.ready.then(onFontsChanged);
+          fonts.addEventListener("loadingdone", onFontsChanged);
+          fonts.addEventListener("loadingerror", onFontsChanged);
+
+          removeFontListeners = () => {
+            fonts.removeEventListener("loadingdone", onFontsChanged);
+            fonts.removeEventListener("loadingerror", onFontsChanged);
+          };
+        }
+
+        reconnect();
+        initialized = true;
+      };
+
+      openRafId = window.requestAnimationFrame(initializeTerminal);
 
       return () => {
         disposedRef.current = true;
         desiredStateRef.current = "closed";
+
+        if (openRafId) {
+          window.cancelAnimationFrame(openRafId);
+          openRafId = null;
+        }
 
         if (reconnectTimerRef.current) {
           window.clearTimeout(reconnectTimerRef.current);
@@ -291,8 +349,14 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
 
         resizeObserverRef.current?.disconnect();
         removeFontListeners?.();
-        onDataDispose.dispose();
-        terminal.dispose();
+        onDataDispose?.dispose();
+        if (initialized) {
+          try {
+            terminal.dispose();
+          } catch {
+            // Prevent dispose race from crashing unmount.
+          }
+        }
         terminalRef.current = null;
         fitAddonRef.current = null;
       };
