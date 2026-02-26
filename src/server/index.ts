@@ -11,7 +11,10 @@ type WebSocketData = {
   clientId: string;
 };
 
-const manager = new TerminalSessionManager();
+const manager = new TerminalSessionManager({
+  tmuxSocketName: Bun.env.COMMAND_CENTER_TMUX_SOCKET ?? undefined,
+  registryPath: Bun.env.COMMAND_CENTER_REGISTRY_PATH ?? undefined,
+});
 
 export function buildHealthResponse(): Response {
   return Response.json({

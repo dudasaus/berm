@@ -4,6 +4,12 @@ import {
   type ServerMessage,
   type TerminalStatusState,
 } from "../shared/protocol";
+import {
+  defaultSessionRegistryPath,
+  loadSessionRegistry,
+  saveSessionRegistry,
+  type SessionRegistryEntry,
+} from "./session-registry";
 
 export interface SessionClient {
   id: string;
@@ -50,10 +56,13 @@ interface TerminalSessionManagerOptions {
   defaultRows?: number;
   cwd?: string;
   env?: Record<string, string | undefined>;
+  tmuxSocketName?: string;
+  registryPath?: string;
 }
 
 const DEFAULT_COLS = 120;
 const DEFAULT_ROWS = 34;
+const DEFAULT_TMUX_SOCKET_NAME = "command-center";
 const textDecoder = new TextDecoder();
 
 class SessionManagerError extends Error {
@@ -70,7 +79,16 @@ class SessionManagerError extends Error {
 
 function isNotRunningTmuxError(stderr: string): boolean {
   const lowered = stderr.toLowerCase();
-  return lowered.includes("no server running") || lowered.includes("failed to connect to server");
+  if (lowered.includes("no server running") || lowered.includes("failed to connect to server")) {
+    return true;
+  }
+
+  return lowered.includes("error connecting to") && lowered.includes("no such file or directory");
+}
+
+function loweredIncludesAny(value: string, patterns: string[]): boolean {
+  const lowered = value.toLowerCase();
+  return patterns.some((pattern) => lowered.includes(pattern));
 }
 
 function isMissingSessionError(stderr: string): boolean {
@@ -79,11 +97,6 @@ function isMissingSessionError(stderr: string): boolean {
 
 function isTmuxUnavailableError(stderr: string): boolean {
   return loweredIncludesAny(stderr, ["operation not permitted", "permission denied", "access denied"]);
-}
-
-function loweredIncludesAny(value: string, patterns: string[]): boolean {
-  const lowered = value.toLowerCase();
-  return patterns.some((pattern) => lowered.includes(pattern));
 }
 
 function parseSessionCreatedAt(value: string): number {
@@ -110,10 +123,19 @@ function parseSessionLine(line: string): TmuxSessionRef | null {
   };
 }
 
+function entryToTimestamp(value: string): number {
+  const parsed = Date.parse(value);
+  if (Number.isNaN(parsed)) {
+    return Date.now();
+  }
+  return parsed;
+}
+
 export class TerminalSessionManager {
   private readonly options: Required<TerminalSessionManagerOptions>;
   private readonly sessions = new Map<string, TerminalSession>();
-  private tmuxUnavailableReason: string | null = null;
+  private readonly registry = new Map<string, SessionRegistryEntry>();
+  private unavailableReason: string | null = null;
 
   constructor(options: TerminalSessionManagerOptions = {}) {
     this.options = {
@@ -121,13 +143,25 @@ export class TerminalSessionManager {
       defaultRows: options.defaultRows ?? DEFAULT_ROWS,
       cwd: options.cwd ?? process.cwd(),
       env: options.env ?? process.env,
+      tmuxSocketName: options.tmuxSocketName ?? DEFAULT_TMUX_SOCKET_NAME,
+      registryPath: options.registryPath ?? defaultSessionRegistryPath(),
     };
+
+    try {
+      const loaded = loadSessionRegistry(this.options.registryPath);
+      for (const [id, entry] of loaded.entries()) {
+        this.registry.set(id, entry);
+      }
+    } catch (error) {
+      this.unavailableReason = `Session registry is not accessible: ${error instanceof Error ? error.message : String(error)}`;
+      return;
+    }
 
     this.syncSessionsFromTmux();
   }
 
   isTmuxAvailable(): boolean {
-    return this.tmuxUnavailableReason === null;
+    return this.unavailableReason === null;
   }
 
   listSessions(): SessionMetadata[] {
@@ -152,7 +186,7 @@ export class TerminalSessionManager {
 
   createSession(name?: string): SessionMetadata {
     this.syncSessionsFromTmux();
-    this.assertTmuxAvailable();
+    this.assertAvailable();
 
     const targetName = name?.trim() ? name.trim() : this.nextAutoName();
     this.validateSessionName(targetName);
@@ -170,7 +204,32 @@ export class TerminalSessionManager {
       );
     }
 
+    if (!this.tmuxSessionExists(targetName)) {
+      const details = createResult.stderr || "tmux did not report an active session";
+      if (isTmuxUnavailableError(details)) {
+        throw new SessionManagerError(
+          `tmux is not accessible in this environment: ${details}`,
+          503,
+          "TMUX_UNAVAILABLE",
+        );
+      }
+
+      throw new SessionManagerError(
+        `Failed to create tmux session '${targetName}': ${details}`,
+        500,
+        "SESSION_CREATE_FAILED",
+      );
+    }
+
     const now = Date.now();
+    const nowIso = new Date(now).toISOString();
+    this.registry.set(targetName, {
+      id: targetName,
+      createdAt: nowIso,
+      lastActiveAt: nowIso,
+    });
+    this.saveRegistry();
+
     const session: TerminalSession = {
       id: targetName,
       cols: this.options.defaultCols,
@@ -183,18 +242,16 @@ export class TerminalSessionManager {
     };
 
     this.sessions.set(session.id, session);
-    this.syncSessionsFromTmux();
-
-    return this.toMetadata(this.sessions.get(session.id)!);
+    return this.toMetadata(session);
   }
 
   deleteSession(sessionId: string): boolean {
     this.syncSessionsFromTmux();
-    this.assertTmuxAvailable();
+    this.assertAvailable();
 
     const existsLocally = this.sessions.has(sessionId);
-    const existsInTmux = this.tmuxSessionExists(sessionId);
-    if (!existsLocally && !existsInTmux) {
+    const existsInRegistry = this.registry.has(sessionId);
+    if (!existsLocally && !existsInRegistry) {
       return false;
     }
 
@@ -214,6 +271,9 @@ export class TerminalSessionManager {
       );
     }
 
+    this.registry.delete(sessionId);
+    this.saveRegistry();
+
     return true;
   }
 
@@ -222,7 +282,7 @@ export class TerminalSessionManager {
     if (!this.isTmuxAvailable()) {
       this.sendToClient(client, {
         type: "error",
-        message: this.tmuxUnavailableReason ?? "tmux is not available in this environment",
+        message: this.unavailableReason ?? "tmux is not available in this environment",
       });
       return null;
     }
@@ -334,7 +394,7 @@ export class TerminalSessionManager {
       }
       this.broadcastToSession(session, {
         type: "error",
-        message: this.tmuxUnavailableReason ?? "tmux is not available",
+        message: this.unavailableReason ?? "tmux is not available",
       });
       return;
     }
@@ -381,7 +441,7 @@ export class TerminalSessionManager {
   private spawnAttachment(session: TerminalSession, client: SessionClient): void {
     const spawnVersion = session.nextSpawnVersion++;
 
-    const proc = Bun.spawn(["tmux", "attach-session", "-t", session.id], {
+    const proc = Bun.spawn(["tmux", "-L", this.options.tmuxSocketName, "attach-session", "-t", session.id], {
       cwd: this.options.cwd,
       env: this.options.env,
       terminal: {
@@ -547,19 +607,21 @@ export class TerminalSessionManager {
   }
 
   private syncSessionsFromTmux(): void {
+    if (this.unavailableReason?.startsWith("Session registry")) {
+      return;
+    }
+
     const listResult = this.runTmux(["list-sessions", "-F", "#{session_name}\t#{session_created}"]);
+
     if (listResult.exitCode !== 0) {
       if (isNotRunningTmuxError(listResult.stderr)) {
-        this.tmuxUnavailableReason = null;
-        for (const session of this.sessions.values()) {
-          this.stopAllAttachments(session, false);
-        }
-        this.sessions.clear();
+        this.unavailableReason = null;
+        this.reconcileFromListed([]);
         return;
       }
 
       if (isTmuxUnavailableError(listResult.stderr)) {
-        this.tmuxUnavailableReason = `tmux is not accessible in this environment: ${listResult.stderr}`;
+        this.unavailableReason = `tmux is not accessible in this environment: ${listResult.stderr}`;
         for (const session of this.sessions.values()) {
           this.stopAllAttachments(session, false);
         }
@@ -567,7 +629,7 @@ export class TerminalSessionManager {
         return;
       }
 
-      this.tmuxUnavailableReason = `Unable to use tmux: ${listResult.stderr || "unknown error"}`;
+      this.unavailableReason = `Unable to use tmux: ${listResult.stderr || "unknown error"}`;
       for (const session of this.sessions.values()) {
         this.stopAllAttachments(session, false);
       }
@@ -575,53 +637,110 @@ export class TerminalSessionManager {
       return;
     }
 
-    this.tmuxUnavailableReason = null;
+    this.unavailableReason = null;
 
     const listed = listResult.stdout
       .split("\n")
       .map((line) => parseSessionLine(line))
       .filter((session): session is TmuxSessionRef => session !== null);
 
-    const listedIds = new Set(listed.map((session) => session.id));
+    this.reconcileFromListed(listed);
+  }
+
+  private reconcileFromListed(listed: TmuxSessionRef[]): void {
+    const listedMap = new Map(listed.map((session) => [session.id, session]));
+    const listedIds = new Set(listedMap.keys());
+    let registryChanged = false;
+
+    for (const registryId of [...this.registry.keys()]) {
+      if (!listedIds.has(registryId)) {
+        this.registry.delete(registryId);
+        registryChanged = true;
+      }
+    }
+
+    const trackedIds = new Set<string>();
+    for (const registryId of this.registry.keys()) {
+      if (listedIds.has(registryId)) {
+        trackedIds.add(registryId);
+      }
+    }
 
     for (const [sessionId, session] of this.sessions.entries()) {
-      if (!listedIds.has(sessionId)) {
+      if (!trackedIds.has(sessionId)) {
         this.stopAllAttachments(session, false);
         this.sessions.delete(sessionId);
       }
     }
 
-    for (const listedSession of listed) {
-      const existing = this.sessions.get(listedSession.id);
+    for (const sessionId of trackedIds) {
+      const listedSession = listedMap.get(sessionId);
+      const registryEntry = this.registry.get(sessionId);
+      if (!listedSession || !registryEntry) {
+        continue;
+      }
+
+      const createdAtMs = entryToTimestamp(registryEntry.createdAt);
+      const registryLastActiveMs = entryToTimestamp(registryEntry.lastActiveAt);
+
+      const existing = this.sessions.get(sessionId);
       if (!existing) {
-        this.sessions.set(listedSession.id, {
-          id: listedSession.id,
+        this.sessions.set(sessionId, {
+          id: sessionId,
           cols: this.options.defaultCols,
           rows: this.options.defaultRows,
           state: "ready",
-          createdAtMs: listedSession.createdAtMs,
-          lastActiveAtMs: listedSession.createdAtMs,
+          createdAtMs,
+          lastActiveAtMs: registryLastActiveMs,
           attachments: new Map(),
           nextSpawnVersion: 1,
         });
         continue;
       }
 
-      existing.createdAtMs = listedSession.createdAtMs;
+      existing.createdAtMs = createdAtMs;
       existing.state = "ready";
+      if (existing.lastActiveAtMs < registryLastActiveMs) {
+        existing.lastActiveAtMs = registryLastActiveMs;
+      }
+
+      const normalizedLastActive = new Date(existing.lastActiveAtMs).toISOString();
+      const normalizedCreatedAt = new Date(existing.createdAtMs).toISOString();
+      if (registryEntry.createdAt !== normalizedCreatedAt || registryEntry.lastActiveAt !== normalizedLastActive) {
+        this.registry.set(sessionId, {
+          ...registryEntry,
+          createdAt: normalizedCreatedAt,
+          lastActiveAt: normalizedLastActive,
+        });
+        registryChanged = true;
+      }
+    }
+
+    if (registryChanged) {
+      this.saveRegistry();
     }
   }
 
-  private assertTmuxAvailable(): void {
-    if (!this.tmuxUnavailableReason) {
+  private saveRegistry(): void {
+    try {
+      saveSessionRegistry(this.options.registryPath, this.registry);
+    } catch (error) {
+      this.unavailableReason = `Session registry is not writable: ${error instanceof Error ? error.message : String(error)}`;
+      throw new SessionManagerError(this.unavailableReason, 500, "REGISTRY_WRITE_FAILED");
+    }
+  }
+
+  private assertAvailable(): void {
+    if (!this.unavailableReason) {
       return;
     }
 
-    throw new SessionManagerError(this.tmuxUnavailableReason, 503, "TMUX_UNAVAILABLE");
+    const code = this.unavailableReason.startsWith("Session registry") ? "REGISTRY_UNAVAILABLE" : "TMUX_UNAVAILABLE";
+    throw new SessionManagerError(this.unavailableReason, 503, code);
   }
 
   private runTmux(args: string[]): { exitCode: number; stdout: string; stderr: string } {
-    const result = Bun.spawnSync(["tmux", ...args], {
+    const result = Bun.spawnSync(["tmux", "-L", this.options.tmuxSocketName, ...args], {
       cwd: this.options.cwd,
       env: this.options.env,
       stdout: "pipe",
