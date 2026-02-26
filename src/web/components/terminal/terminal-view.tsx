@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Command, Eraser, Plus, RefreshCw, RotateCcw, Trash2 } from "lucide-react";
+import { ChevronDown, ChevronUp, Command, Eraser, Plus, RefreshCw, RotateCcw, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { Badge } from "../ui/badge";
@@ -27,6 +27,7 @@ import type { TerminalStatusState } from "../../../shared/protocol";
 
 const STACK_LAYOUT_BREAKPOINT_PX = 1100;
 const SELECTED_SESSION_STORAGE_KEY = "command-center.selected-session-id";
+const SESSION_ORDER_STORAGE_KEY = "command-center.session-order";
 
 type SessionMetadata = {
   id: string;
@@ -114,6 +115,28 @@ function readStoredSessionId(): string | null {
   return window.sessionStorage.getItem(SELECTED_SESSION_STORAGE_KEY);
 }
 
+function readStoredSessionOrder(): string[] {
+  if (typeof window === "undefined") {
+    return [];
+  }
+
+  const raw = window.localStorage.getItem(SESSION_ORDER_STORAGE_KEY);
+  if (!raw) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+
+    return parsed.filter((value): value is string => typeof value === "string" && value.trim().length > 0);
+  } catch {
+    return [];
+  }
+}
+
 function promptForOptionalSessionName(): string | undefined | null {
   const provided = window.prompt(
     "Enter a session name (letters, numbers, underscores, hyphens). Leave blank for auto-generated.",
@@ -134,6 +157,7 @@ export function TerminalView() {
   const [connectionState, setConnectionState] = useState<TerminalConnectionState>("disconnected");
   const [terminalState, setTerminalState] = useState<TerminalStatusState>("starting");
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(() => readStoredSessionId());
+  const [sessionOrder, setSessionOrder] = useState<string[]>(() => readStoredSessionOrder());
   const [isStackedLayout, setIsStackedLayout] = useState(() => {
     if (typeof window === "undefined") {
       return false;
@@ -161,6 +185,10 @@ export function TerminalView() {
       window.sessionStorage.removeItem(SELECTED_SESSION_STORAGE_KEY);
     }
   }, [selectedSessionId]);
+
+  useEffect(() => {
+    window.localStorage.setItem(SESSION_ORDER_STORAGE_KEY, JSON.stringify(sessionOrder));
+  }, [sessionOrder]);
 
   const healthQuery = useQuery({
     queryKey: ["health"],
@@ -207,34 +235,78 @@ export function TerminalView() {
   });
 
   const sessions = sessionsQuery.data ?? [];
+  const orderedSessions = useMemo(() => {
+    if (sessions.length === 0) {
+      return [];
+    }
+
+    const byId = new Map(sessions.map((session) => [session.id, session]));
+    const ordered: SessionMetadata[] = [];
+
+    for (const sessionId of sessionOrder) {
+      const session = byId.get(sessionId);
+      if (!session) {
+        continue;
+      }
+
+      ordered.push(session);
+      byId.delete(sessionId);
+    }
+
+    const remaining = [...byId.values()].sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
+    ordered.push(...remaining);
+
+    return ordered;
+  }, [sessionOrder, sessions]);
+
+  useEffect(() => {
+    const currentIds = new Set(sessions.map((session) => session.id));
+    const incomingIds = sessions.map((session) => session.id);
+
+    setSessionOrder((previous) => {
+      const retained = previous.filter((sessionId) => currentIds.has(sessionId));
+      for (const sessionId of incomingIds) {
+        if (!retained.includes(sessionId)) {
+          retained.push(sessionId);
+        }
+      }
+
+      if (retained.length === previous.length && retained.every((sessionId, index) => sessionId === previous[index])) {
+        return previous;
+      }
+
+      return retained;
+    });
+  }, [sessions]);
+
   const selectedSession = useMemo(
-    () => sessions.find((session) => session.id === selectedSessionId) ?? null,
-    [selectedSessionId, sessions],
+    () => orderedSessions.find((session) => session.id === selectedSessionId) ?? null,
+    [orderedSessions, selectedSessionId],
   );
 
   useEffect(() => {
-    if (sessions.length === 0) {
+    if (orderedSessions.length === 0) {
       if (selectedSessionId !== null) {
         setSelectedSessionId(null);
       }
       return;
     }
 
-    if (selectedSessionId && sessions.some((session) => session.id === selectedSessionId)) {
+    if (selectedSessionId && orderedSessions.some((session) => session.id === selectedSessionId)) {
       return;
     }
 
     const stored = readStoredSessionId();
-    if (stored && sessions.some((session) => session.id === stored)) {
+    if (stored && orderedSessions.some((session) => session.id === stored)) {
       setSelectedSessionId(stored);
       return;
     }
 
-    const firstSession = sessions[0];
+    const firstSession = orderedSessions[0];
     if (firstSession) {
       setSelectedSessionId(firstSession.id);
     }
-  }, [selectedSessionId, sessions]);
+  }, [orderedSessions, selectedSessionId]);
 
   useEffect(() => {
     if (!selectedSession) {
@@ -262,6 +334,24 @@ export function TerminalView() {
     }
 
     deleteSessionMutation.mutate(sessionId);
+  };
+
+  const moveSession = (sessionId: string, direction: -1 | 1) => {
+    setSessionOrder((previous) => {
+      const index = previous.indexOf(sessionId);
+      if (index === -1) {
+        return previous;
+      }
+
+      const targetIndex = index + direction;
+      if (targetIndex < 0 || targetIndex >= previous.length) {
+        return previous;
+      }
+
+      const next = [...previous];
+      [next[index], next[targetIndex]] = [next[targetIndex]!, next[index]!];
+      return next;
+    });
   };
 
   const handleSessionUnavailable = useCallback(
@@ -345,8 +435,11 @@ export function TerminalView() {
                   </div>
                 ) : (
                   <div className="space-y-2">
-                    {sessions.map((session) => {
+                    {orderedSessions.map((session) => {
                       const isSelected = session.id === selectedSessionId;
+                      const position = sessionOrder.indexOf(session.id);
+                      const canMoveUp = position > 0;
+                      const canMoveDown = position !== -1 && position < sessionOrder.length - 1;
 
                       return (
                         <div
@@ -366,6 +459,42 @@ export function TerminalView() {
                                 active {new Date(session.lastActiveAt).toLocaleTimeString()} · clients {session.attachedClients}
                               </p>
                             </button>
+
+                            <div className="flex items-center">
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <Button
+                                    size="icon"
+                                    variant="ghost"
+                                    className="h-7 w-7"
+                                    disabled={!canMoveUp}
+                                    onClick={() => {
+                                      moveSession(session.id, -1);
+                                    }}
+                                  >
+                                    <ChevronUp className="h-4 w-4" />
+                                  </Button>
+                                </TooltipTrigger>
+                                <TooltipContent>Move up</TooltipContent>
+                              </Tooltip>
+
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <Button
+                                    size="icon"
+                                    variant="ghost"
+                                    className="h-7 w-7"
+                                    disabled={!canMoveDown}
+                                    onClick={() => {
+                                      moveSession(session.id, 1);
+                                    }}
+                                  >
+                                    <ChevronDown className="h-4 w-4" />
+                                  </Button>
+                                </TooltipTrigger>
+                                <TooltipContent>Move down</TooltipContent>
+                              </Tooltip>
+                            </div>
 
                             <Tooltip>
                               <TooltipTrigger asChild>
