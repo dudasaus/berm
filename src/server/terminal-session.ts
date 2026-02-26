@@ -1,3 +1,7 @@
+import { createHash } from "node:crypto";
+import { realpathSync, statSync } from "node:fs";
+import { basename, isAbsolute } from "node:path";
+
 import {
   parseClientMessage,
   type ClientMessage,
@@ -8,6 +12,8 @@ import {
   defaultSessionRegistryPath,
   loadSessionRegistry,
   saveSessionRegistry,
+  sessionRegistryKey,
+  type ProjectRegistryEntry,
   type SessionRegistryEntry,
 } from "./session-registry";
 
@@ -17,8 +23,17 @@ export interface SessionClient {
   close?: (code?: number, reason?: string) => void;
 }
 
+export interface ProjectMetadata {
+  id: string;
+  name: string;
+  path: string;
+  createdAt: string;
+  lastUsedAt: string;
+}
+
 export interface SessionMetadata {
   id: string;
+  projectId: string;
   state: TerminalStatusState;
   connected: boolean;
   cols: number;
@@ -36,7 +51,10 @@ interface SessionAttachment {
 }
 
 interface TerminalSession {
+  key: string;
+  projectId: string;
   id: string;
+  tmuxSessionName: string;
   cols: number;
   rows: number;
   state: TerminalStatusState;
@@ -47,7 +65,7 @@ interface TerminalSession {
 }
 
 interface TmuxSessionRef {
-  id: string;
+  tmuxSessionName: string;
   createdAtMs: number;
 }
 
@@ -112,13 +130,13 @@ function parseSessionLine(line: string): TmuxSessionRef | null {
     return null;
   }
 
-  const [id, created] = line.split("\t");
-  if (!id?.trim()) {
+  const [tmuxSessionName, created] = line.split("\t");
+  if (!tmuxSessionName?.trim()) {
     return null;
   }
 
   return {
-    id: id.trim(),
+    tmuxSessionName: tmuxSessionName.trim(),
     createdAtMs: parseSessionCreatedAt(created ?? ""),
   };
 }
@@ -131,10 +149,20 @@ function entryToTimestamp(value: string): number {
   return parsed;
 }
 
+function projectIdForPath(path: string): string {
+  const hash = createHash("sha1").update(path).digest("hex");
+  return `proj_${hash.slice(0, 12)}`;
+}
+
+function sessionTmuxName(projectId: string, sessionId: string): string {
+  return `${projectId}__${sessionId}`;
+}
+
 export class TerminalSessionManager {
   private readonly options: Required<TerminalSessionManagerOptions>;
   private readonly sessions = new Map<string, TerminalSession>();
-  private readonly registry = new Map<string, SessionRegistryEntry>();
+  private readonly projects = new Map<string, ProjectRegistryEntry>();
+  private readonly registrySessions = new Map<string, SessionRegistryEntry>();
   private unavailableReason: string | null = null;
 
   constructor(options: TerminalSessionManagerOptions = {}) {
@@ -149,8 +177,12 @@ export class TerminalSessionManager {
 
     try {
       const loaded = loadSessionRegistry(this.options.registryPath);
-      for (const [id, entry] of loaded.entries()) {
-        this.registry.set(id, entry);
+      for (const [id, entry] of loaded.projects.entries()) {
+        this.projects.set(id, entry);
+      }
+
+      for (const [key, entry] of loaded.sessions.entries()) {
+        this.registrySessions.set(key, entry);
       }
     } catch (error) {
       this.unavailableReason = `Session registry is not accessible: ${error instanceof Error ? error.message : String(error)}`;
@@ -164,38 +196,153 @@ export class TerminalSessionManager {
     return this.unavailableReason === null;
   }
 
-  listSessions(): SessionMetadata[] {
+  listProjects(): ProjectMetadata[] {
+    return [...this.projects.values()]
+      .sort((a, b) => {
+        const lastUsedDiff = entryToTimestamp(b.lastUsedAt) - entryToTimestamp(a.lastUsedAt);
+        if (lastUsedDiff !== 0) {
+          return lastUsedDiff;
+        }
+
+        return a.name.localeCompare(b.name) || a.id.localeCompare(b.id);
+      })
+      .map((project) => ({ ...project }));
+  }
+
+  selectProject(inputPath: string): ProjectMetadata {
+    const selectedPath = this.normalizeProjectPath(inputPath);
+    const now = new Date().toISOString();
+
+    for (const [id, project] of this.projects.entries()) {
+      if (project.path !== selectedPath) {
+        continue;
+      }
+
+      const updated: ProjectRegistryEntry = {
+        ...project,
+        lastUsedAt: now,
+      };
+      this.projects.set(id, updated);
+      this.saveRegistry();
+      return { ...updated };
+    }
+
+    const id = projectIdForPath(selectedPath);
+    const derivedName = basename(selectedPath) || selectedPath;
+    const project: ProjectRegistryEntry = {
+      id,
+      name: derivedName,
+      path: selectedPath,
+      createdAt: now,
+      lastUsedAt: now,
+    };
+
+    this.projects.set(id, project);
+    this.saveRegistry();
+    return { ...project };
+  }
+
+  getProject(projectId: string): ProjectMetadata | null {
+    const project = this.projects.get(projectId);
+    if (!project) {
+      return null;
+    }
+
+    return { ...project };
+  }
+
+  deleteProject(projectId: string): boolean {
+    this.syncSessionsFromTmux();
+    this.assertAvailable();
+
+    if (!this.projects.has(projectId)) {
+      return false;
+    }
+
+    const sessionKeys = new Set<string>();
+    for (const [key, entry] of this.registrySessions.entries()) {
+      if (entry.projectId === projectId) {
+        sessionKeys.add(key);
+      }
+    }
+
+    for (const [key, session] of this.sessions.entries()) {
+      if (session.projectId === projectId) {
+        sessionKeys.add(key);
+      }
+    }
+
+    for (const key of sessionKeys) {
+      const registryEntry = this.registrySessions.get(key);
+      const liveSession = this.sessions.get(key);
+
+      if (liveSession) {
+        this.broadcastToSession(liveSession, { type: "session_deleted", sessionId: liveSession.id });
+        this.stopAllAttachments(liveSession, true);
+        this.sessions.delete(key);
+      }
+
+      const tmuxName = registryEntry?.tmuxSessionName ?? liveSession?.tmuxSessionName;
+      if (tmuxName) {
+        const killResult = this.runTmux(["kill-session", "-t", tmuxName]);
+        if (killResult.exitCode !== 0 && !isMissingSessionError(killResult.stderr)) {
+          throw new SessionManagerError(
+            `Failed to delete project '${projectId}': ${killResult.stderr || "unknown error"}`,
+            500,
+            "PROJECT_DELETE_FAILED",
+          );
+        }
+      }
+
+      this.registrySessions.delete(key);
+    }
+
+    this.projects.delete(projectId);
+    this.saveRegistry();
+    return true;
+  }
+
+  listSessions(projectId: string): SessionMetadata[] {
     this.syncSessionsFromTmux();
     if (!this.isTmuxAvailable()) {
       return [];
     }
 
+    if (!this.projects.has(projectId)) {
+      return [];
+    }
+
     return [...this.sessions.values()]
+      .filter((session) => session.projectId === projectId)
       .sort((a, b) => b.lastActiveAtMs - a.lastActiveAtMs)
       .map((session) => this.toMetadata(session));
   }
 
-  hasSession(sessionId: string): boolean {
+  hasSession(projectId: string, sessionId: string): boolean {
     this.syncSessionsFromTmux();
     if (!this.isTmuxAvailable()) {
       return false;
     }
 
-    return this.sessions.has(sessionId);
+    return this.sessions.has(this.sessionKey(projectId, sessionId));
   }
 
-  createSession(name?: string): SessionMetadata {
+  createSession(projectId: string, name?: string): SessionMetadata {
     this.syncSessionsFromTmux();
     this.assertAvailable();
 
-    const targetName = name?.trim() ? name.trim() : this.nextAutoName();
+    const project = this.requireProject(projectId);
+
+    const targetName = name?.trim() ? name.trim() : this.nextAutoName(project.id);
     this.validateSessionName(targetName);
 
-    if (this.sessions.has(targetName) || this.tmuxSessionExists(targetName)) {
-      throw new SessionManagerError(`Session '${targetName}' already exists`, 409, "SESSION_EXISTS");
+    const key = this.sessionKey(project.id, targetName);
+    const tmuxSessionName = sessionTmuxName(project.id, targetName);
+    if (this.sessions.has(key) || this.registrySessions.has(key) || this.tmuxSessionExists(tmuxSessionName)) {
+      throw new SessionManagerError(`Session '${targetName}' already exists in project '${project.name}'`, 409, "SESSION_EXISTS");
     }
 
-    const createResult = this.runTmux(["new-session", "-d", "-s", targetName, "-c", this.options.cwd, "zsh"]);
+    const createResult = this.runTmux(["new-session", "-d", "-s", tmuxSessionName, "-c", project.path, "zsh"]);
     if (createResult.exitCode !== 0) {
       throw new SessionManagerError(
         `Failed to create tmux session '${targetName}': ${createResult.stderr || "unknown error"}`,
@@ -204,7 +351,7 @@ export class TerminalSessionManager {
       );
     }
 
-    if (!this.tmuxSessionExists(targetName)) {
+    if (!this.tmuxSessionExists(tmuxSessionName)) {
       const details = createResult.stderr || "tmux did not report an active session";
       if (isTmuxUnavailableError(details)) {
         throw new SessionManagerError(
@@ -223,15 +370,20 @@ export class TerminalSessionManager {
 
     const now = Date.now();
     const nowIso = new Date(now).toISOString();
-    this.registry.set(targetName, {
-      id: targetName,
+    this.registrySessions.set(key, {
+      projectId: project.id,
+      sessionId: targetName,
+      tmuxSessionName,
       createdAt: nowIso,
       lastActiveAt: nowIso,
     });
     this.saveRegistry();
 
     const session: TerminalSession = {
+      key,
+      projectId: project.id,
       id: targetName,
+      tmuxSessionName,
       cols: this.options.defaultCols,
       rows: this.options.defaultRows,
       state: "ready",
@@ -241,28 +393,33 @@ export class TerminalSessionManager {
       nextSpawnVersion: 1,
     };
 
-    this.sessions.set(session.id, session);
+    this.sessions.set(key, session);
     return this.toMetadata(session);
   }
 
-  deleteSession(sessionId: string): boolean {
+  deleteSession(projectId: string, sessionId: string): boolean {
     this.syncSessionsFromTmux();
     this.assertAvailable();
 
-    const existsLocally = this.sessions.has(sessionId);
-    const existsInRegistry = this.registry.has(sessionId);
-    if (!existsLocally && !existsInRegistry) {
+    if (!this.projects.has(projectId)) {
       return false;
     }
 
-    const session = this.sessions.get(sessionId);
+    const key = this.sessionKey(projectId, sessionId);
+    const registryEntry = this.registrySessions.get(key);
+    const session = this.sessions.get(key);
+    if (!registryEntry && !session) {
+      return false;
+    }
+
     if (session) {
       this.broadcastToSession(session, { type: "session_deleted", sessionId });
       this.stopAllAttachments(session, false);
-      this.sessions.delete(sessionId);
+      this.sessions.delete(key);
     }
 
-    const killResult = this.runTmux(["kill-session", "-t", sessionId]);
+    const tmuxName = registryEntry?.tmuxSessionName ?? sessionTmuxName(projectId, sessionId);
+    const killResult = this.runTmux(["kill-session", "-t", tmuxName]);
     if (killResult.exitCode !== 0 && !isMissingSessionError(killResult.stderr)) {
       throw new SessionManagerError(
         `Failed to delete tmux session '${sessionId}': ${killResult.stderr || "unknown error"}`,
@@ -271,13 +428,13 @@ export class TerminalSessionManager {
       );
     }
 
-    this.registry.delete(sessionId);
+    this.registrySessions.delete(key);
     this.saveRegistry();
 
     return true;
   }
 
-  attachClient(sessionId: string, client: SessionClient): SessionMetadata | null {
+  attachClient(projectId: string, sessionId: string, client: SessionClient): SessionMetadata | null {
     this.syncSessionsFromTmux();
     if (!this.isTmuxAvailable()) {
       this.sendToClient(client, {
@@ -287,12 +444,12 @@ export class TerminalSessionManager {
       return null;
     }
 
-    const session = this.sessions.get(sessionId);
+    const session = this.sessions.get(this.sessionKey(projectId, sessionId));
     if (!session) {
       return null;
     }
 
-    this.detachClient(sessionId, client.id);
+    this.detachClient(projectId, sessionId, client.id);
 
     session.lastActiveAtMs = Date.now();
     this.sendToClient(client, { type: "status", state: "starting" });
@@ -301,8 +458,8 @@ export class TerminalSessionManager {
     return this.toMetadata(session);
   }
 
-  detachClient(sessionId: string, clientId: string): void {
-    const session = this.sessions.get(sessionId);
+  detachClient(projectId: string, sessionId: string, clientId: string): void {
+    const session = this.sessions.get(this.sessionKey(projectId, sessionId));
     if (!session) {
       return;
     }
@@ -311,8 +468,8 @@ export class TerminalSessionManager {
     session.lastActiveAtMs = Date.now();
   }
 
-  handleClientMessage(sessionId: string, clientId: string, rawMessage: unknown): void {
-    const session = this.sessions.get(sessionId);
+  handleClientMessage(projectId: string, sessionId: string, clientId: string, rawMessage: unknown): void {
+    const session = this.sessions.get(this.sessionKey(projectId, sessionId));
     if (!session) {
       return;
     }
@@ -330,13 +487,13 @@ export class TerminalSessionManager {
     this.applyClientMessage(session, clientId, parsed.value);
   }
 
-  getSessionMetadata(sessionId: string): SessionMetadata | null {
+  getSessionMetadata(projectId: string, sessionId: string): SessionMetadata | null {
     this.syncSessionsFromTmux();
     if (!this.isTmuxAvailable()) {
       return null;
     }
 
-    const session = this.sessions.get(sessionId);
+    const session = this.sessions.get(this.sessionKey(projectId, sessionId));
     if (!session) {
       return null;
     }
@@ -367,7 +524,7 @@ export class TerminalSessionManager {
       }
 
       case "reset": {
-        this.resetSession(session.id);
+        this.resetSession(session.key);
         return;
       }
 
@@ -385,10 +542,10 @@ export class TerminalSessionManager {
     }
   }
 
-  private resetSession(sessionId: string): void {
+  private resetSession(sessionKeyValue: string): void {
     this.syncSessionsFromTmux();
     if (!this.isTmuxAvailable()) {
-      const session = this.sessions.get(sessionId);
+      const session = this.sessions.get(sessionKeyValue);
       if (!session) {
         return;
       }
@@ -399,31 +556,40 @@ export class TerminalSessionManager {
       return;
     }
 
-    const session = this.sessions.get(sessionId);
+    const session = this.sessions.get(sessionKeyValue);
     if (!session) {
+      return;
+    }
+
+    const project = this.projects.get(session.projectId);
+    if (!project) {
+      this.broadcastToSession(session, {
+        type: "error",
+        message: "Project is no longer available for this session",
+      });
       return;
     }
 
     const clients = [...session.attachments.values()].map((attachment) => attachment.client);
     this.stopAllAttachments(session, false);
 
-    const killResult = this.runTmux(["kill-session", "-t", sessionId]);
+    const killResult = this.runTmux(["kill-session", "-t", session.tmuxSessionName]);
     if (killResult.exitCode !== 0 && !isMissingSessionError(killResult.stderr)) {
       for (const client of clients) {
         this.sendToClient(client, {
           type: "error",
-          message: `Failed to reset session '${sessionId}': ${killResult.stderr || "unknown error"}`,
+          message: `Failed to reset session '${session.id}': ${killResult.stderr || "unknown error"}`,
         });
       }
       return;
     }
 
-    const createResult = this.runTmux(["new-session", "-d", "-s", sessionId, "-c", this.options.cwd, "zsh"]);
+    const createResult = this.runTmux(["new-session", "-d", "-s", session.tmuxSessionName, "-c", project.path, "zsh"]);
     if (createResult.exitCode !== 0) {
       for (const client of clients) {
         this.sendToClient(client, {
           type: "error",
-          message: `Failed to recreate session '${sessionId}': ${createResult.stderr || "unknown error"}`,
+          message: `Failed to recreate session '${session.id}': ${createResult.stderr || "unknown error"}`,
         });
       }
       return;
@@ -441,14 +607,17 @@ export class TerminalSessionManager {
   private spawnAttachment(session: TerminalSession, client: SessionClient): void {
     const spawnVersion = session.nextSpawnVersion++;
 
-    const proc = Bun.spawn(["tmux", "-L", this.options.tmuxSocketName, "attach-session", "-t", session.id], {
-      cwd: this.options.cwd,
+    const project = this.projects.get(session.projectId);
+    const cwd = project?.path ?? this.options.cwd;
+
+    const proc = Bun.spawn(["tmux", "-L", this.options.tmuxSocketName, "attach-session", "-t", session.tmuxSessionName], {
+      cwd,
       env: this.options.env,
       terminal: {
         cols: session.cols,
         rows: session.rows,
         data: (_terminal, data) => {
-          const activeSession = this.sessions.get(session.id);
+          const activeSession = this.sessions.get(session.key);
           if (!activeSession) {
             return;
           }
@@ -473,7 +642,7 @@ export class TerminalSessionManager {
 
     void proc.exited
       .then((code) => {
-        const activeSession = this.sessions.get(session.id);
+        const activeSession = this.sessions.get(session.key);
         if (!activeSession) {
           return;
         }
@@ -486,14 +655,14 @@ export class TerminalSessionManager {
         activeSession.attachments.delete(client.id);
         activeSession.lastActiveAtMs = Date.now();
 
-        if (!this.tmuxSessionExists(session.id)) {
+        if (!this.tmuxSessionExists(session.tmuxSessionName)) {
           this.sendToClient(client, { type: "session_not_found", sessionId: session.id });
         }
 
         this.sendToClient(client, { type: "exit", code, signal: null });
       })
       .catch((error) => {
-        const activeSession = this.sessions.get(session.id);
+        const activeSession = this.sessions.get(session.key);
         if (!activeSession) {
           return;
         }
@@ -547,6 +716,7 @@ export class TerminalSessionManager {
 
     return {
       id: session.id,
+      projectId: session.projectId,
       state: session.state,
       connected: session.attachments.size > 0,
       cols: session.cols,
@@ -586,23 +756,24 @@ export class TerminalSessionManager {
     }
   }
 
-  private nextAutoName(): string {
+  private nextAutoName(projectId: string): string {
     let index = 1;
     while (true) {
       const candidate = `session-${index.toString().padStart(3, "0")}`;
-      if (!this.sessions.has(candidate) && !this.tmuxSessionExists(candidate)) {
+      const key = this.sessionKey(projectId, candidate);
+      if (!this.sessions.has(key) && !this.registrySessions.has(key) && !this.tmuxSessionExists(sessionTmuxName(projectId, candidate))) {
         return candidate;
       }
       index += 1;
     }
   }
 
-  private tmuxSessionExists(sessionId: string): boolean {
+  private tmuxSessionExists(tmuxSessionName: string): boolean {
     if (!this.isTmuxAvailable()) {
       return false;
     }
 
-    const result = this.runTmux(["has-session", "-t", sessionId]);
+    const result = this.runTmux(["has-session", "-t", tmuxSessionName]);
     return result.exitCode === 0;
   }
 
@@ -648,45 +819,39 @@ export class TerminalSessionManager {
   }
 
   private reconcileFromListed(listed: TmuxSessionRef[]): void {
-    const listedMap = new Map(listed.map((session) => [session.id, session]));
-    const listedIds = new Set(listedMap.keys());
+    const listedMap = new Map(listed.map((session) => [session.tmuxSessionName, session]));
     let registryChanged = false;
 
-    for (const registryId of [...this.registry.keys()]) {
-      if (!listedIds.has(registryId)) {
-        this.registry.delete(registryId);
+    for (const [key, entry] of [...this.registrySessions.entries()]) {
+      if (!this.projects.has(entry.projectId) || !listedMap.has(entry.tmuxSessionName)) {
+        this.registrySessions.delete(key);
         registryChanged = true;
       }
     }
 
-    const trackedIds = new Set<string>();
-    for (const registryId of this.registry.keys()) {
-      if (listedIds.has(registryId)) {
-        trackedIds.add(registryId);
-      }
-    }
-
-    for (const [sessionId, session] of this.sessions.entries()) {
-      if (!trackedIds.has(sessionId)) {
+    for (const [key, session] of this.sessions.entries()) {
+      if (!this.registrySessions.has(key)) {
         this.stopAllAttachments(session, false);
-        this.sessions.delete(sessionId);
+        this.sessions.delete(key);
       }
     }
 
-    for (const sessionId of trackedIds) {
-      const listedSession = listedMap.get(sessionId);
-      const registryEntry = this.registry.get(sessionId);
-      if (!listedSession || !registryEntry) {
+    for (const [key, registryEntry] of this.registrySessions.entries()) {
+      const listedSession = listedMap.get(registryEntry.tmuxSessionName);
+      if (!listedSession) {
         continue;
       }
 
       const createdAtMs = entryToTimestamp(registryEntry.createdAt);
       const registryLastActiveMs = entryToTimestamp(registryEntry.lastActiveAt);
 
-      const existing = this.sessions.get(sessionId);
+      const existing = this.sessions.get(key);
       if (!existing) {
-        this.sessions.set(sessionId, {
-          id: sessionId,
+        this.sessions.set(key, {
+          key,
+          projectId: registryEntry.projectId,
+          id: registryEntry.sessionId,
+          tmuxSessionName: registryEntry.tmuxSessionName,
           cols: this.options.defaultCols,
           rows: this.options.defaultRows,
           state: "ready",
@@ -707,13 +872,14 @@ export class TerminalSessionManager {
       const normalizedLastActive = new Date(existing.lastActiveAtMs).toISOString();
       const normalizedCreatedAt = new Date(existing.createdAtMs).toISOString();
       if (registryEntry.createdAt !== normalizedCreatedAt || registryEntry.lastActiveAt !== normalizedLastActive) {
-        this.registry.set(sessionId, {
+        this.registrySessions.set(key, {
           ...registryEntry,
           createdAt: normalizedCreatedAt,
           lastActiveAt: normalizedLastActive,
         });
         registryChanged = true;
       }
+
     }
 
     if (registryChanged) {
@@ -723,7 +889,10 @@ export class TerminalSessionManager {
 
   private saveRegistry(): void {
     try {
-      saveSessionRegistry(this.options.registryPath, this.registry);
+      saveSessionRegistry(this.options.registryPath, {
+        projects: this.projects,
+        sessions: this.registrySessions,
+      });
     } catch (error) {
       this.unavailableReason = `Session registry is not writable: ${error instanceof Error ? error.message : String(error)}`;
       throw new SessionManagerError(this.unavailableReason, 500, "REGISTRY_WRITE_FAILED");
@@ -737,6 +906,51 @@ export class TerminalSessionManager {
 
     const code = this.unavailableReason.startsWith("Session registry") ? "REGISTRY_UNAVAILABLE" : "TMUX_UNAVAILABLE";
     throw new SessionManagerError(this.unavailableReason, 503, code);
+  }
+
+  private normalizeProjectPath(inputPath: string): string {
+    const path = inputPath.trim();
+    if (!path) {
+      throw new SessionManagerError("Project path cannot be empty", 400, "PROJECT_PATH_INVALID");
+    }
+
+    if (!isAbsolute(path)) {
+      throw new SessionManagerError("Project path must be absolute", 400, "PROJECT_PATH_INVALID");
+    }
+
+    let normalized: string;
+    try {
+      normalized = realpathSync(path);
+    } catch {
+      throw new SessionManagerError("Project path does not exist", 400, "PROJECT_PATH_INVALID");
+    }
+
+    try {
+      const stat = statSync(normalized);
+      if (!stat.isDirectory()) {
+        throw new SessionManagerError("Project path must be a directory", 400, "PROJECT_PATH_INVALID");
+      }
+    } catch (error) {
+      if (isSessionManagerError(error)) {
+        throw error;
+      }
+      throw new SessionManagerError("Project path must be a directory", 400, "PROJECT_PATH_INVALID");
+    }
+
+    return normalized;
+  }
+
+  private requireProject(projectId: string): ProjectRegistryEntry {
+    const project = this.projects.get(projectId);
+    if (!project) {
+      throw new SessionManagerError("Project not found", 404, "PROJECT_NOT_FOUND");
+    }
+
+    return project;
+  }
+
+  private sessionKey(projectId: string, sessionId: string): string {
+    return sessionRegistryKey(projectId, sessionId);
   }
 
   private runTmux(args: string[]): { exitCode: number; stdout: string; stderr: string } {

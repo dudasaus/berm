@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { mkdirSync, rmSync } from "node:fs";
 
 import { buildHealthResponse, buildSessionResponse } from "../../src/server/index";
 import { TerminalSessionManager } from "../../src/server/terminal-session";
@@ -14,10 +15,20 @@ describe("HTTP response builders", () => {
   });
 
   test("session response returns 404 for unknown session", async () => {
-    const manager = new TerminalSessionManager();
-    const response = buildSessionResponse(manager, "unknown");
+    const projectPath = `/tmp/command-center-http-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+    mkdirSync(projectPath, { recursive: true });
+
+    const manager = new TerminalSessionManager({
+      tmuxSocketName: `cc-http-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+      registryPath: `/tmp/command-center-http-registry-${Date.now()}-${Math.random().toString(16).slice(2, 8)}.json`,
+    });
+
+    const project = manager.selectProject(projectPath);
+    const response = buildSessionResponse(manager, project.id, "unknown");
 
     expect(response.status).toBe(404);
     await manager.shutdown();
+
+    rmSync(projectPath, { recursive: true, force: true });
   });
 });

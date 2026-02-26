@@ -2,21 +2,52 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
-export interface SessionRegistryEntry {
+export interface ProjectRegistryEntry {
   id: string;
+  name: string;
+  path: string;
+  createdAt: string;
+  lastUsedAt: string;
+}
+
+export interface SessionRegistryEntry {
+  projectId: string;
+  sessionId: string;
+  tmuxSessionName: string;
   createdAt: string;
   lastActiveAt: string;
 }
 
 interface SessionRegistryFile {
   version: number;
+  projects: ProjectRegistryEntry[];
   sessions: SessionRegistryEntry[];
 }
 
-const REGISTRY_VERSION = 1;
+interface LegacySessionRegistryEntryV1 {
+  id: string;
+  createdAt: string;
+  lastActiveAt: string;
+}
+
+interface LegacySessionRegistryFileV1 {
+  version: 1;
+  sessions: LegacySessionRegistryEntryV1[];
+}
+
+export interface SessionRegistryData {
+  projects: Map<string, ProjectRegistryEntry>;
+  sessions: Map<string, SessionRegistryEntry>;
+}
+
+const REGISTRY_VERSION = 2;
 
 export function defaultSessionRegistryPath(): string {
   return join(homedir(), ".command-center", "sessions.json");
+}
+
+export function sessionRegistryKey(projectId: string, sessionId: string): string {
+  return `${projectId}::${sessionId}`;
 }
 
 function normalizeDate(value: string | undefined, fallbackMs: number): string {
@@ -32,51 +63,102 @@ function normalizeDate(value: string | undefined, fallbackMs: number): string {
   return new Date(parsed).toISOString();
 }
 
-export function loadSessionRegistry(path: string): Map<string, SessionRegistryEntry> {
+function emptyRegistryData(): SessionRegistryData {
+  return {
+    projects: new Map<string, ProjectRegistryEntry>(),
+    sessions: new Map<string, SessionRegistryEntry>(),
+  };
+}
+
+export function loadSessionRegistry(path: string): SessionRegistryData {
   const directory = dirname(path);
   if (!existsSync(directory)) {
     mkdirSync(directory, { recursive: true });
   }
 
   if (!existsSync(path)) {
-    const empty = new Map<string, SessionRegistryEntry>();
+    const empty = emptyRegistryData();
     saveSessionRegistry(path, empty);
     return empty;
   }
 
   const raw = readFileSync(path, "utf8");
-  let parsed: SessionRegistryFile;
+  let parsed: SessionRegistryFile | LegacySessionRegistryFileV1;
 
   try {
-    parsed = JSON.parse(raw) as SessionRegistryFile;
+    parsed = JSON.parse(raw) as SessionRegistryFile | LegacySessionRegistryFileV1;
   } catch {
     const backupPath = `${path}.bak-${Date.now()}`;
     renameSync(path, backupPath);
-    const empty = new Map<string, SessionRegistryEntry>();
+    const empty = emptyRegistryData();
     saveSessionRegistry(path, empty);
     return empty;
   }
 
-  const map = new Map<string, SessionRegistryEntry>();
-  const sessions = Array.isArray(parsed.sessions) ? parsed.sessions : [];
+  if (parsed.version !== REGISTRY_VERSION) {
+    const empty = emptyRegistryData();
+    saveSessionRegistry(path, empty);
+    return empty;
+  }
 
-  for (const session of sessions) {
-    if (!session || typeof session.id !== "string" || !session.id.trim()) {
+  const projects = new Map<string, ProjectRegistryEntry>();
+  const projectEntries = Array.isArray(parsed.projects) ? parsed.projects : [];
+  for (const project of projectEntries) {
+    if (
+      !project ||
+      typeof project.id !== "string" ||
+      !project.id.trim() ||
+      typeof project.name !== "string" ||
+      !project.name.trim() ||
+      typeof project.path !== "string" ||
+      !project.path.trim()
+    ) {
       continue;
     }
 
     const now = Date.now();
-    map.set(session.id, {
-      id: session.id,
+    projects.set(project.id, {
+      id: project.id,
+      name: project.name,
+      path: project.path,
+      createdAt: normalizeDate(project.createdAt, now),
+      lastUsedAt: normalizeDate(project.lastUsedAt, now),
+    });
+  }
+
+  const sessions = new Map<string, SessionRegistryEntry>();
+  const sessionEntries = Array.isArray(parsed.sessions) ? parsed.sessions : [];
+  for (const session of sessionEntries) {
+    if (
+      !session ||
+      typeof session.projectId !== "string" ||
+      !session.projectId.trim() ||
+      typeof session.sessionId !== "string" ||
+      !session.sessionId.trim() ||
+      typeof session.tmuxSessionName !== "string" ||
+      !session.tmuxSessionName.trim()
+    ) {
+      continue;
+    }
+
+    if (!projects.has(session.projectId)) {
+      continue;
+    }
+
+    const now = Date.now();
+    sessions.set(sessionRegistryKey(session.projectId, session.sessionId), {
+      projectId: session.projectId,
+      sessionId: session.sessionId,
+      tmuxSessionName: session.tmuxSessionName,
       createdAt: normalizeDate(session.createdAt, now),
       lastActiveAt: normalizeDate(session.lastActiveAt, now),
     });
   }
 
-  return map;
+  return { projects, sessions };
 }
 
-export function saveSessionRegistry(path: string, sessions: Map<string, SessionRegistryEntry>): void {
+export function saveSessionRegistry(path: string, data: SessionRegistryData): void {
   const directory = dirname(path);
   if (!existsSync(directory)) {
     mkdirSync(directory, { recursive: true });
@@ -84,7 +166,18 @@ export function saveSessionRegistry(path: string, sessions: Map<string, SessionR
 
   const payload: SessionRegistryFile = {
     version: REGISTRY_VERSION,
-    sessions: [...sessions.values()].sort((a, b) => a.id.localeCompare(b.id)),
+    projects: [...data.projects.values()].sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id)),
+    sessions: [...data.sessions.values()].sort((a, b) => {
+      if (a.projectId !== b.projectId) {
+        return a.projectId.localeCompare(b.projectId);
+      }
+
+      if (a.sessionId !== b.sessionId) {
+        return a.sessionId.localeCompare(b.sessionId);
+      }
+
+      return a.tmuxSessionName.localeCompare(b.tmuxSessionName);
+    }),
   };
 
   const tempPath = `${path}.tmp-${process.pid}-${Date.now()}`;

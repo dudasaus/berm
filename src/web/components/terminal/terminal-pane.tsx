@@ -16,19 +16,20 @@ export interface TerminalPaneHandle {
 }
 
 interface TerminalPaneProps {
+  projectId: string;
   sessionId: string;
   onConnectionStateChange: (state: TerminalConnectionState) => void;
   onTerminalStateChange: (state: TerminalStatusState) => void;
   onSessionUnavailable: (sessionId: string, reason: SessionUnavailableReason) => void;
 }
 
-function wsUrl(sessionId: string) {
+function wsUrl(projectId: string, sessionId: string) {
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-  return `${protocol}//${window.location.host}/ws/terminal?sessionId=${encodeURIComponent(sessionId)}`;
+  return `${protocol}//${window.location.host}/ws/terminal?projectId=${encodeURIComponent(projectId)}&sessionId=${encodeURIComponent(sessionId)}`;
 }
 
 export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
-  ({ sessionId, onConnectionStateChange, onTerminalStateChange, onSessionUnavailable }, ref) => {
+  ({ projectId, sessionId, onConnectionStateChange, onTerminalStateChange, onSessionUnavailable }, ref) => {
     const mountRef = useRef<HTMLDivElement | null>(null);
     const terminalRef = useRef<Terminal | null>(null);
     const fitAddonRef = useRef<FitAddon | null>(null);
@@ -114,7 +115,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
         socket.close(1000, "Client reconnect");
       }
 
-      const nextSocket = new WebSocket(wsUrl(sessionId));
+      const nextSocket = new WebSocket(wsUrl(projectId, sessionId));
       socketRef.current = nextSocket;
       onConnectionStateChangeRef.current("connecting");
 
@@ -197,7 +198,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
           reconnect();
         }, 1_200);
       };
-    }, [safeFitAndResize, sendMessage, sessionId]);
+    }, [projectId, safeFitAndResize, sendMessage, sessionId]);
 
     useImperativeHandle(
       ref,

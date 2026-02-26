@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ChevronDown, ChevronUp, Command, Eraser, Plus, RefreshCw, RotateCcw, Trash2 } from "lucide-react";
+import { ChevronDown, ChevronUp, Command, Eraser, FolderOpen, Plus, RefreshCw, RotateCcw, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { Badge } from "../ui/badge";
@@ -26,11 +26,27 @@ import {
 import type { TerminalStatusState } from "../../../shared/protocol";
 
 const STACK_LAYOUT_BREAKPOINT_PX = 1100;
-const SELECTED_SESSION_STORAGE_KEY = "command-center.selected-session-id";
-const SESSION_ORDER_STORAGE_KEY = "command-center.session-order";
+const SELECTED_PROJECT_STORAGE_KEY = "command-center.selected-project-id";
+
+function selectedSessionStorageKey(projectId: string) {
+  return `command-center.selected-session-id.${projectId}`;
+}
+
+function sessionOrderStorageKey(projectId: string) {
+  return `command-center.session-order.${projectId}`;
+}
+
+type ProjectMetadata = {
+  id: string;
+  name: string;
+  path: string;
+  createdAt: string;
+  lastUsedAt: string;
+};
 
 type SessionMetadata = {
   id: string;
+  projectId: string;
   state: TerminalStatusState;
   connected: boolean;
   cols: number;
@@ -49,8 +65,58 @@ async function fetchHealth() {
   return response.json() as Promise<{ ok: boolean; now: string }>;
 }
 
-async function fetchSessions() {
-  const response = await fetch("/api/sessions");
+async function fetchProjects() {
+  const response = await fetch("/api/projects");
+  if (!response.ok) {
+    throw new Error(`projects request failed with ${response.status}`);
+  }
+
+  const payload = (await response.json()) as { projects?: ProjectMetadata[] } | ProjectMetadata[];
+  if (Array.isArray(payload)) {
+    return payload;
+  }
+
+  return payload.projects ?? [];
+}
+
+async function selectProject(path: string) {
+  const response = await fetch("/api/projects/select", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ path }),
+  });
+
+  const payload = (await response.json()) as ProjectMetadata | { error?: string };
+  if (!response.ok) {
+    throw new Error("error" in payload && payload.error ? payload.error : `select project failed with ${response.status}`);
+  }
+
+  return payload as ProjectMetadata;
+}
+
+async function pickProjectPath() {
+  const response = await fetch("/api/projects/pick", {
+    method: "POST",
+  });
+
+  const payload = (await response.json()) as { path?: string; error?: string; code?: string };
+  if (!response.ok) {
+    const error = payload.error ?? `project picker failed with ${response.status}`;
+    const code = payload.code ?? "PROJECT_PICK_FAILED";
+    throw new Error(`${code}: ${error}`);
+  }
+
+  if (!payload.path || typeof payload.path !== "string") {
+    throw new Error("PROJECT_PICK_EMPTY: No project path returned by picker");
+  }
+
+  return payload.path;
+}
+
+async function fetchSessions(projectId: string) {
+  const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/sessions`);
   if (!response.ok) {
     throw new Error(`sessions request failed with ${response.status}`);
   }
@@ -59,16 +125,17 @@ async function fetchSessions() {
   if (Array.isArray(payload)) {
     return payload;
   }
+
   return payload.sessions ?? [];
 }
 
-async function createSession(request: { name?: string }) {
-  const response = await fetch("/api/sessions", {
+async function createSession(request: { projectId: string; name?: string }) {
+  const response = await fetch(`/api/projects/${encodeURIComponent(request.projectId)}/sessions`, {
     method: "POST",
     headers: {
       "content-type": "application/json",
     },
-    body: JSON.stringify(request),
+    body: JSON.stringify({ name: request.name }),
   });
 
   const payload = (await response.json()) as SessionMetadata | { error?: string };
@@ -79,8 +146,28 @@ async function createSession(request: { name?: string }) {
   return payload as SessionMetadata;
 }
 
-async function deleteSession(sessionId: string) {
-  const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+async function deleteSession(request: { projectId: string; sessionId: string }) {
+  const response = await fetch(
+    `/api/projects/${encodeURIComponent(request.projectId)}/sessions/${encodeURIComponent(request.sessionId)}`,
+    {
+      method: "DELETE",
+    },
+  );
+
+  if (response.status === 404) {
+    return false;
+  }
+
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => ({}))) as { error?: string };
+    throw new Error(payload.error ?? `delete session failed with ${response.status}`);
+  }
+
+  return true;
+}
+
+async function deleteProject(projectId: string) {
+  const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}`, {
     method: "DELETE",
   });
 
@@ -90,7 +177,7 @@ async function deleteSession(sessionId: string) {
 
   if (!response.ok) {
     const payload = (await response.json().catch(() => ({}))) as { error?: string };
-    throw new Error(payload.error ?? `delete session failed with ${response.status}`);
+    throw new Error(payload.error ?? `delete project failed with ${response.status}`);
   }
 
   return true;
@@ -108,19 +195,28 @@ function badgeVariantForConnection(state: TerminalConnectionState) {
   return "outline" as const;
 }
 
-function readStoredSessionId(): string | null {
+function readStoredProjectId(): string | null {
   if (typeof window === "undefined") {
     return null;
   }
-  return window.sessionStorage.getItem(SELECTED_SESSION_STORAGE_KEY);
+
+  return window.sessionStorage.getItem(SELECTED_PROJECT_STORAGE_KEY);
 }
 
-function readStoredSessionOrder(): string[] {
+function readStoredSessionId(projectId: string): string | null {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  return window.sessionStorage.getItem(selectedSessionStorageKey(projectId));
+}
+
+function readStoredSessionOrder(projectId: string): string[] {
   if (typeof window === "undefined") {
     return [];
   }
 
-  const raw = window.localStorage.getItem(SESSION_ORDER_STORAGE_KEY);
+  const raw = window.localStorage.getItem(sessionOrderStorageKey(projectId));
   if (!raw) {
     return [];
   }
@@ -150,14 +246,25 @@ function promptForOptionalSessionName(): string | undefined | null {
   return trimmed || undefined;
 }
 
+function promptForProjectPath(): string | null {
+  const provided = window.prompt("Enter an absolute project directory path:");
+  if (provided === null) {
+    return null;
+  }
+
+  const trimmed = provided.trim();
+  return trimmed || null;
+}
+
 export function TerminalView() {
   const terminalRef = useRef<TerminalPaneHandle | null>(null);
   const queryClient = useQueryClient();
 
   const [connectionState, setConnectionState] = useState<TerminalConnectionState>("disconnected");
   const [terminalState, setTerminalState] = useState<TerminalStatusState>("starting");
-  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(() => readStoredSessionId());
-  const [sessionOrder, setSessionOrder] = useState<string[]>(() => readStoredSessionOrder());
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(() => readStoredProjectId());
+  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
+  const [sessionOrder, setSessionOrder] = useState<string[]>([]);
   const [isStackedLayout, setIsStackedLayout] = useState(() => {
     if (typeof window === "undefined") {
       return false;
@@ -179,16 +286,37 @@ export function TerminalView() {
   }, []);
 
   useEffect(() => {
-    if (selectedSessionId) {
-      window.sessionStorage.setItem(SELECTED_SESSION_STORAGE_KEY, selectedSessionId);
+    if (selectedProjectId) {
+      window.sessionStorage.setItem(SELECTED_PROJECT_STORAGE_KEY, selectedProjectId);
+      setSelectedSessionId(readStoredSessionId(selectedProjectId));
+      setSessionOrder(readStoredSessionOrder(selectedProjectId));
     } else {
-      window.sessionStorage.removeItem(SELECTED_SESSION_STORAGE_KEY);
+      window.sessionStorage.removeItem(SELECTED_PROJECT_STORAGE_KEY);
+      setSelectedSessionId(null);
+      setSessionOrder([]);
     }
-  }, [selectedSessionId]);
+  }, [selectedProjectId]);
 
   useEffect(() => {
-    window.localStorage.setItem(SESSION_ORDER_STORAGE_KEY, JSON.stringify(sessionOrder));
-  }, [sessionOrder]);
+    if (!selectedProjectId) {
+      return;
+    }
+
+    const key = selectedSessionStorageKey(selectedProjectId);
+    if (selectedSessionId) {
+      window.sessionStorage.setItem(key, selectedSessionId);
+    } else {
+      window.sessionStorage.removeItem(key);
+    }
+  }, [selectedProjectId, selectedSessionId]);
+
+  useEffect(() => {
+    if (!selectedProjectId) {
+      return;
+    }
+
+    window.localStorage.setItem(sessionOrderStorageKey(selectedProjectId), JSON.stringify(sessionOrder));
+  }, [selectedProjectId, sessionOrder]);
 
   const healthQuery = useQuery({
     queryKey: ["health"],
@@ -196,10 +324,58 @@ export function TerminalView() {
     refetchInterval: 5_000,
   });
 
+  const projectsQuery = useQuery({
+    queryKey: ["projects"],
+    queryFn: fetchProjects,
+    refetchInterval: 5_000,
+  });
+
   const sessionsQuery = useQuery({
-    queryKey: ["sessions"],
-    queryFn: fetchSessions,
+    queryKey: ["sessions", selectedProjectId],
+    queryFn: async () => {
+      if (!selectedProjectId) {
+        return [] as SessionMetadata[];
+      }
+      return fetchSessions(selectedProjectId);
+    },
+    enabled: Boolean(selectedProjectId),
     refetchInterval: 2_500,
+  });
+
+  const selectProjectMutation = useMutation({
+    mutationFn: selectProject,
+    onSuccess: (project) => {
+      setSelectedProjectId(project.id);
+      setConnectionState("disconnected");
+      setTerminalState("starting");
+      toast.success(`Selected project ${project.name}`);
+      void queryClient.invalidateQueries({ queryKey: ["projects"] });
+      void queryClient.invalidateQueries({ queryKey: ["sessions", project.id] });
+    },
+    onError: (error) => {
+      toast.error(error instanceof Error ? error.message : String(error));
+    },
+  });
+
+  const deleteProjectMutation = useMutation({
+    mutationFn: deleteProject,
+    onSuccess: (deleted, projectId) => {
+      if (!deleted) {
+        toast.info("Project no longer exists");
+      } else {
+        toast.success("Project deleted");
+      }
+
+      if (selectedProjectId === projectId) {
+        setSelectedProjectId(null);
+      }
+
+      void queryClient.invalidateQueries({ queryKey: ["projects"] });
+      void queryClient.invalidateQueries({ queryKey: ["sessions"] });
+    },
+    onError: (error) => {
+      toast.error(error instanceof Error ? error.message : String(error));
+    },
   });
 
   const createSessionMutation = useMutation({
@@ -207,7 +383,7 @@ export function TerminalView() {
     onSuccess: (createdSession) => {
       setSelectedSessionId(createdSession.id);
       toast.success(`Created session ${createdSession.id}`);
-      void queryClient.invalidateQueries({ queryKey: ["sessions"] });
+      void queryClient.invalidateQueries({ queryKey: ["sessions", createdSession.projectId] });
     },
     onError: (error) => {
       toast.error(error instanceof Error ? error.message : String(error));
@@ -216,23 +392,50 @@ export function TerminalView() {
 
   const deleteSessionMutation = useMutation({
     mutationFn: deleteSession,
-    onSuccess: (deleted, sessionId) => {
+    onSuccess: (deleted, request) => {
       if (!deleted) {
-        toast.info(`Session ${sessionId} no longer exists`);
+        toast.info(`Session ${request.sessionId} no longer exists`);
       } else {
-        toast.success(`Deleted session ${sessionId}`);
+        toast.success(`Deleted session ${request.sessionId}`);
       }
 
-      if (selectedSessionId === sessionId) {
+      if (selectedSessionId === request.sessionId) {
         setSelectedSessionId(null);
       }
 
-      void queryClient.invalidateQueries({ queryKey: ["sessions"] });
+      void queryClient.invalidateQueries({ queryKey: ["sessions", request.projectId] });
     },
     onError: (error) => {
       toast.error(error instanceof Error ? error.message : String(error));
     },
   });
+
+  const projects = projectsQuery.data ?? [];
+  const selectedProject = useMemo(
+    () => projects.find((project) => project.id === selectedProjectId) ?? null,
+    [projects, selectedProjectId],
+  );
+
+  useEffect(() => {
+    if (projects.length === 0) {
+      if (selectedProjectId !== null) {
+        setSelectedProjectId(null);
+      }
+      return;
+    }
+
+    if (selectedProjectId && projects.some((project) => project.id === selectedProjectId)) {
+      return;
+    }
+
+    const stored = readStoredProjectId();
+    if (stored && projects.some((project) => project.id === stored)) {
+      setSelectedProjectId(stored);
+      return;
+    }
+
+    setSelectedProjectId(projects[0]?.id ?? null);
+  }, [projects, selectedProjectId]);
 
   const sessions = sessionsQuery.data ?? [];
   const orderedSessions = useMemo(() => {
@@ -296,17 +499,19 @@ export function TerminalView() {
       return;
     }
 
-    const stored = readStoredSessionId();
-    if (stored && orderedSessions.some((session) => session.id === stored)) {
-      setSelectedSessionId(stored);
-      return;
+    if (selectedProjectId) {
+      const stored = readStoredSessionId(selectedProjectId);
+      if (stored && orderedSessions.some((session) => session.id === stored)) {
+        setSelectedSessionId(stored);
+        return;
+      }
     }
 
     const firstSession = orderedSessions[0];
     if (firstSession) {
       setSelectedSessionId(firstSession.id);
     }
-  }, [orderedSessions, selectedSessionId]);
+  }, [orderedSessions, selectedProjectId, selectedSessionId]);
 
   useEffect(() => {
     if (!selectedSession) {
@@ -314,26 +519,77 @@ export function TerminalView() {
     }
   }, [selectedSession]);
 
+  const handleSelectProjectPath = () => {
+    const path = promptForProjectPath();
+    if (!path) {
+      return;
+    }
+
+    selectProjectMutation.mutate(path);
+  };
+
+  const handlePickProject = async () => {
+    try {
+      const path = await pickProjectPath();
+      selectProjectMutation.mutate(path);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.startsWith("PROJECT_PICK_CANCELLED")) {
+        return;
+      }
+      toast.error(message);
+    }
+  };
+
+  const handleDeleteProject = () => {
+    if (!selectedProject) {
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Delete project '${selectedProject.name}' and all of its sessions? This will kill all tmux sessions in that project.`,
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    deleteProjectMutation.mutate(selectedProject.id);
+  };
+
   const handleCreateAutoSession = () => {
-    createSessionMutation.mutate({});
+    if (!selectedProjectId) {
+      toast.warning("Select a project first");
+      return;
+    }
+
+    createSessionMutation.mutate({ projectId: selectedProjectId });
   };
 
   const handleCreateNamedSession = () => {
+    if (!selectedProjectId) {
+      toast.warning("Select a project first");
+      return;
+    }
+
     const desiredName = promptForOptionalSessionName();
     if (desiredName === null) {
       return;
     }
 
-    createSessionMutation.mutate({ name: desiredName });
+    createSessionMutation.mutate({ projectId: selectedProjectId, name: desiredName });
   };
 
   const handleDeleteSession = (sessionId: string) => {
+    if (!selectedProjectId) {
+      return;
+    }
+
     const confirmed = window.confirm(`Delete session '${sessionId}'? This will kill the tmux session.`);
     if (!confirmed) {
       return;
     }
 
-    deleteSessionMutation.mutate(sessionId);
+    deleteSessionMutation.mutate({ projectId: selectedProjectId, sessionId });
   };
 
   const moveSession = (sessionId: string, direction: -1 | 1) => {
@@ -358,9 +614,11 @@ export function TerminalView() {
     (sessionId: string, reason: SessionUnavailableReason) => {
       setSelectedSessionId((current) => (current === sessionId ? null : current));
       toast.warning(reason === "deleted" ? `Session ${sessionId} was deleted` : `Session ${sessionId} was not found`);
-      void queryClient.invalidateQueries({ queryKey: ["sessions"] });
+      if (selectedProjectId) {
+        void queryClient.invalidateQueries({ queryKey: ["sessions", selectedProjectId] });
+      }
     },
-    [queryClient],
+    [queryClient, selectedProjectId],
   );
 
   const connectionBadgeText = selectedSession ? connectionState : "no-session";
@@ -370,8 +628,52 @@ export function TerminalView() {
       <main className="mx-auto flex h-[100dvh] min-h-screen w-full max-w-[1500px] flex-col gap-3 px-3 py-3 md:gap-4 md:px-6 md:py-4">
         <header className="rounded-xl border border-border bg-card/70 px-4 py-2.5 shadow-sm backdrop-blur-sm">
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <div>
+            <div className="flex items-center gap-2">
               <h1 className="font-heading text-xl tracking-tight">Command Center</h1>
+
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    disabled={selectProjectMutation.isPending || deleteProjectMutation.isPending}
+                  >
+                    <FolderOpen className="h-4 w-4" />
+                    Project
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="start" className="w-[360px]">
+                  <DropdownMenuLabel>{selectedProject ? `Current: ${selectedProject.name}` : "No project selected"}</DropdownMenuLabel>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem onSelect={handlePickProject}>Pick directory</DropdownMenuItem>
+                  <DropdownMenuItem onSelect={handleSelectProjectPath}>Enter path manually</DropdownMenuItem>
+                  <DropdownMenuItem
+                    disabled={!selectedProject || deleteProjectMutation.isPending}
+                    onSelect={handleDeleteProject}
+                  >
+                    Delete current project
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuLabel>Recent projects</DropdownMenuLabel>
+                  {projects.length === 0 ? (
+                    <DropdownMenuItem disabled>No projects yet</DropdownMenuItem>
+                  ) : (
+                    projects.slice(0, 12).map((project) => (
+                      <DropdownMenuItem
+                        key={project.id}
+                        onSelect={() => {
+                          selectProjectMutation.mutate(project.path);
+                        }}
+                      >
+                        <div className="min-w-0">
+                          <p className="truncate font-mono text-xs font-semibold">{project.name}</p>
+                          <p className="truncate font-mono text-[11px] text-muted-foreground">{project.path}</p>
+                        </div>
+                      </DropdownMenuItem>
+                    ))
+                  )}
+                </DropdownMenuContent>
+              </DropdownMenu>
             </div>
 
             <div className="flex flex-wrap items-center gap-2">
@@ -383,6 +685,9 @@ export function TerminalView() {
               </Badge>
               <Badge variant={healthQuery.data?.ok ? "success" : "outline"} className="font-mono uppercase tracking-wide">
                 API {healthQuery.data?.ok ? "healthy" : "pending"}
+              </Badge>
+              <Badge variant="outline" className="font-mono uppercase tracking-wide">
+                projects {projects.length}
               </Badge>
               <Badge variant="outline" className="font-mono uppercase tracking-wide">
                 sessions {sessions.length}
@@ -400,16 +705,20 @@ export function TerminalView() {
             <Card className="flex h-full min-h-0 flex-col rounded-none border-0 bg-transparent shadow-none">
               <CardHeader className="shrink-0 pb-3">
                 <div className="flex items-center justify-between gap-2">
-                  <div>
+                  <div className="min-w-0">
                     <CardTitle>Sessions</CardTitle>
-                    <CardDescription className="font-mono text-xs">
-                      {selectedSession ? `selected: ${selectedSession.id}` : "No session selected"}
+                    <CardDescription className="truncate font-mono text-xs">
+                      {selectedProject ? `${selectedProject.name} · ${selectedProject.path}` : "Select a project to manage sessions"}
                     </CardDescription>
                   </div>
 
                   <DropdownMenu>
                     <DropdownMenuTrigger asChild>
-                      <Button size="sm" variant="secondary" disabled={createSessionMutation.isPending}>
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        disabled={createSessionMutation.isPending || !selectedProjectId}
+                      >
                         <Plus className="h-4 w-4" />
                         New
                       </Button>
@@ -425,9 +734,17 @@ export function TerminalView() {
               </CardHeader>
 
               <CardContent className="min-h-0 flex-1 space-y-4 overflow-y-auto pr-1">
-                {sessions.length === 0 ? (
+                {!selectedProjectId ? (
                   <div className="rounded-md border border-dashed border-border p-3 text-sm text-muted-foreground">
-                    <p>No tmux sessions yet.</p>
+                    <p>Select a project path to get started.</p>
+                    <Button size="sm" variant="outline" className="mt-2" onClick={handlePickProject}>
+                      <FolderOpen className="h-4 w-4" />
+                      Pick project
+                    </Button>
+                  </div>
+                ) : sessions.length === 0 ? (
+                  <div className="rounded-md border border-dashed border-border p-3 text-sm text-muted-foreground">
+                    <p>No sessions yet in this project.</p>
                     <Button size="sm" variant="outline" className="mt-2" onClick={handleCreateAutoSession}>
                       <Plus className="h-4 w-4" />
                       Create first session
@@ -616,10 +933,11 @@ export function TerminalView() {
           <ResizablePanel defaultSize={isStackedLayout ? 64 : 72} minSize={isStackedLayout ? 40 : 35}>
             <Card className="h-full rounded-none border-0 bg-transparent shadow-none">
               <CardContent className="h-full rounded-md bg-[#1f1811] p-3">
-                {selectedSession ? (
+                {selectedSession && selectedProjectId ? (
                   <TerminalPane
-                    key={selectedSession.id}
+                    key={`${selectedProjectId}:${selectedSession.id}`}
                     ref={terminalRef}
+                    projectId={selectedProjectId}
                     sessionId={selectedSession.id}
                     onConnectionStateChange={setConnectionState}
                     onTerminalStateChange={setTerminalState}
@@ -628,10 +946,10 @@ export function TerminalView() {
                 ) : (
                   <div className="flex h-full items-center justify-center rounded-md border border-border/30 bg-[#1f1811] text-center text-sm text-muted-foreground">
                     <div className="space-y-2">
-                      <p>No session selected.</p>
-                      <Button size="sm" variant="secondary" onClick={handleCreateAutoSession}>
-                        <Plus className="h-4 w-4" />
-                        Create session
+                      <p>{selectedProjectId ? "No session selected." : "No project selected."}</p>
+                      <Button size="sm" variant="secondary" onClick={selectedProjectId ? handleCreateAutoSession : handlePickProject}>
+                        {selectedProjectId ? <Plus className="h-4 w-4" /> : <FolderOpen className="h-4 w-4" />}
+                        {selectedProjectId ? "Create session" : "Pick project"}
                       </Button>
                     </div>
                   </div>
