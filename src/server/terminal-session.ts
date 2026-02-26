@@ -32,6 +32,8 @@ export interface ProjectMetadata {
   lastUsedAt: string;
   worktreeEnabled: boolean;
   worktreeParentPath: string | null;
+  worktreeHookCommand: string | null;
+  worktreeHookTimeoutMs: number;
 }
 
 export interface SessionMetadata {
@@ -57,7 +59,34 @@ export type CreateSessionRequest =
 export interface UpdateProjectRequest {
   worktreeEnabled?: boolean;
   worktreeParentPath?: string | null;
+  worktreeHookCommand?: string | null;
+  worktreeHookTimeoutMs?: number;
 }
+
+export interface WorktreeHookExecutionDetails {
+  command: string;
+  stdout: string;
+  stderr: string;
+  exitCode: number | null;
+  timedOut: boolean;
+}
+
+export interface WorktreeHookFailureDetails {
+  decisionToken: string;
+  projectId: string;
+  branchName: string;
+  workspacePath: string;
+  hook: WorktreeHookExecutionDetails;
+}
+
+export interface ResolveWorktreeHookDecisionRequest {
+  decisionToken: string;
+  decision: "abort" | "continue";
+}
+
+export type ResolveWorktreeHookDecisionResult =
+  | { action: "abort"; ok: true; cleaned: true }
+  | { action: "continue"; session: SessionMetadata };
 
 interface SessionAttachment {
   client: SessionClient;
@@ -96,20 +125,34 @@ interface TerminalSessionManagerOptions {
   registryPath?: string;
 }
 
+interface PendingWorktreeHookDecision {
+  projectId: string;
+  branchName: string;
+  workspacePath: string;
+  hook: WorktreeHookExecutionDetails;
+  createdAtMs: number;
+}
+
 const DEFAULT_COLS = 120;
 const DEFAULT_ROWS = 34;
 const DEFAULT_TMUX_SOCKET_NAME = "command-center";
+const DEFAULT_WORKTREE_HOOK_TIMEOUT_MS = 15_000;
+const MIN_WORKTREE_HOOK_TIMEOUT_MS = 1_000;
+const MAX_WORKTREE_HOOK_TIMEOUT_MS = 120_000;
+const WORKTREE_HOOK_DECISION_TTL_MS = 60 * 60 * 1_000;
 const textDecoder = new TextDecoder();
 
 class SessionManagerError extends Error {
   readonly statusCode: number;
   readonly code: string;
+  readonly details?: Record<string, unknown>;
 
-  constructor(message: string, statusCode = 500, code = "SESSION_ERROR") {
+  constructor(message: string, statusCode = 500, code = "SESSION_ERROR", details?: Record<string, unknown>) {
     super(message);
     this.name = "SessionManagerError";
     this.statusCode = statusCode;
     this.code = code;
+    this.details = details;
   }
 }
 
@@ -201,6 +244,7 @@ export class TerminalSessionManager {
   private readonly sessions = new Map<string, TerminalSession>();
   private readonly projects = new Map<string, ProjectRegistryEntry>();
   private readonly registrySessions = new Map<string, SessionRegistryEntry>();
+  private readonly pendingWorktreeHookDecisions = new Map<string, PendingWorktreeHookDecision>();
   private unavailableReason: string | null = null;
 
   constructor(options: TerminalSessionManagerOptions = {}) {
@@ -275,6 +319,8 @@ export class TerminalSessionManager {
       lastUsedAt: now,
       worktreeEnabled: false,
       worktreeParentPath: null,
+      worktreeHookCommand: null,
+      worktreeHookTimeoutMs: DEFAULT_WORKTREE_HOOK_TIMEOUT_MS,
     };
 
     this.projects.set(id, project);
@@ -299,6 +345,8 @@ export class TerminalSessionManager {
 
     let worktreeEnabled = existing.worktreeEnabled;
     let worktreeParentPath = existing.worktreeParentPath;
+    let worktreeHookCommand = existing.worktreeHookCommand;
+    let worktreeHookTimeoutMs = existing.worktreeHookTimeoutMs;
 
     if (typeof input.worktreeEnabled !== "undefined") {
       if (typeof input.worktreeEnabled !== "boolean") {
@@ -321,10 +369,45 @@ export class TerminalSessionManager {
       }
     }
 
+    if (typeof input.worktreeHookCommand !== "undefined") {
+      if (input.worktreeHookCommand === null) {
+        worktreeHookCommand = null;
+      } else if (typeof input.worktreeHookCommand === "string") {
+        const normalized = input.worktreeHookCommand.trim();
+        worktreeHookCommand = normalized.length > 0 ? normalized : null;
+      } else {
+        throw new SessionManagerError(
+          "worktreeHookCommand must be a string or null",
+          400,
+          "PROJECT_UPDATE_INVALID",
+        );
+      }
+    }
+
+    if (typeof input.worktreeHookTimeoutMs !== "undefined") {
+      if (
+        typeof input.worktreeHookTimeoutMs !== "number" ||
+        !Number.isFinite(input.worktreeHookTimeoutMs) ||
+        Math.floor(input.worktreeHookTimeoutMs) !== input.worktreeHookTimeoutMs ||
+        input.worktreeHookTimeoutMs < MIN_WORKTREE_HOOK_TIMEOUT_MS ||
+        input.worktreeHookTimeoutMs > MAX_WORKTREE_HOOK_TIMEOUT_MS
+      ) {
+        throw new SessionManagerError(
+          `worktreeHookTimeoutMs must be an integer between ${MIN_WORKTREE_HOOK_TIMEOUT_MS} and ${MAX_WORKTREE_HOOK_TIMEOUT_MS}`,
+          400,
+          "PROJECT_UPDATE_INVALID",
+        );
+      }
+
+      worktreeHookTimeoutMs = input.worktreeHookTimeoutMs;
+    }
+
     const updated: ProjectRegistryEntry = {
       ...existing,
       worktreeEnabled,
       worktreeParentPath,
+      worktreeHookCommand,
+      worktreeHookTimeoutMs,
       lastUsedAt: new Date().toISOString(),
     };
 
@@ -388,6 +471,12 @@ export class TerminalSessionManager {
       this.registrySessions.delete(key);
     }
 
+    for (const [decisionToken, pending] of this.pendingWorktreeHookDecisions.entries()) {
+      if (pending.projectId === projectId) {
+        this.pendingWorktreeHookDecisions.delete(decisionToken);
+      }
+    }
+
     this.projects.delete(projectId);
     this.saveRegistry();
     return true;
@@ -423,6 +512,7 @@ export class TerminalSessionManager {
   createSession(projectId: string, nameOrRequest?: string | CreateSessionRequest): SessionMetadata {
     this.syncSessionsFromTmux();
     this.assertAvailable();
+    this.pruneExpiredWorktreeHookDecisions();
 
     const project = this.requireProject(projectId);
     const request = this.normalizeCreateSessionRequest(nameOrRequest);
@@ -475,6 +565,31 @@ export class TerminalSessionManager {
         );
       }
 
+      const hookFailure = this.runWorktreeHook(project, branchName, workspacePath);
+      if (hookFailure) {
+        const decisionToken = crypto.randomUUID();
+        this.pendingWorktreeHookDecisions.set(decisionToken, {
+          projectId: project.id,
+          branchName,
+          workspacePath,
+          hook: hookFailure,
+          createdAtMs: Date.now(),
+        });
+
+        throw new SessionManagerError(
+          `Worktree setup hook failed for branch '${branchName}'`,
+          409,
+          "WORKTREE_HOOK_FAILED",
+          {
+            decisionToken,
+            projectId: project.id,
+            branchName,
+            workspacePath,
+            hook: hookFailure,
+          },
+        );
+      }
+
       try {
         return this.createTrackedSession(project, {
           sessionId: branchName,
@@ -502,6 +617,56 @@ export class TerminalSessionManager {
       workspacePath: project.path,
       branchName: null,
     });
+  }
+
+  resolveWorktreeHookDecision(
+    projectId: string,
+    request: ResolveWorktreeHookDecisionRequest,
+  ): ResolveWorktreeHookDecisionResult {
+    this.syncSessionsFromTmux();
+    this.assertAvailable();
+    this.pruneExpiredWorktreeHookDecisions();
+
+    const project = this.requireProject(projectId);
+
+    if (
+      !request ||
+      typeof request.decisionToken !== "string" ||
+      !request.decisionToken.trim() ||
+      (request.decision !== "abort" && request.decision !== "continue")
+    ) {
+      throw new SessionManagerError(
+        "decisionToken and decision ('abort'|'continue') are required",
+        400,
+        "WORKTREE_HOOK_DECISION_INVALID",
+      );
+    }
+
+    const decisionToken = request.decisionToken.trim();
+    const pending = this.pendingWorktreeHookDecisions.get(decisionToken);
+    if (!pending || pending.projectId !== project.id) {
+      throw new SessionManagerError(
+        "Worktree hook decision token was not found or has expired",
+        404,
+        "WORKTREE_HOOK_DECISION_NOT_FOUND",
+      );
+    }
+
+    if (request.decision === "abort") {
+      this.cleanupWorktreeResources(project.path, pending.workspacePath, pending.branchName);
+      this.pendingWorktreeHookDecisions.delete(decisionToken);
+      return { action: "abort", ok: true, cleaned: true };
+    }
+
+    this.assertSessionAvailable(project, pending.branchName);
+    const session = this.createTrackedSession(project, {
+      sessionId: pending.branchName,
+      workspaceType: "worktree",
+      workspacePath: pending.workspacePath,
+      branchName: pending.branchName,
+    });
+    this.pendingWorktreeHookDecisions.delete(decisionToken);
+    return { action: "continue", session };
   }
 
   deleteSession(projectId: string, sessionId: string): boolean {
@@ -621,6 +786,7 @@ export class TerminalSessionManager {
     for (const session of this.sessions.values()) {
       this.stopAllAttachments(session, false);
     }
+    this.pendingWorktreeHookDecisions.clear();
   }
 
   private applyClientMessage(session: TerminalSession, clientId: string, message: ClientMessage): void {
@@ -993,6 +1159,61 @@ export class TerminalSessionManager {
     const branchToken = sanitizePathToken(branchName) || "branch";
     const branchSuffix = createHash("sha1").update(branchName).digest("hex").slice(0, 8);
     return join(project.worktreeParentPath, `${projectToken}-${branchToken}-${branchSuffix}`);
+  }
+
+  private runWorktreeHook(
+    project: ProjectRegistryEntry,
+    branchName: string,
+    workspacePath: string,
+  ): WorktreeHookExecutionDetails | null {
+    const command = project.worktreeHookCommand?.trim();
+    if (!command) {
+      return null;
+    }
+
+    const timeoutMs =
+      typeof project.worktreeHookTimeoutMs === "number" &&
+      project.worktreeHookTimeoutMs >= MIN_WORKTREE_HOOK_TIMEOUT_MS &&
+      project.worktreeHookTimeoutMs <= MAX_WORKTREE_HOOK_TIMEOUT_MS
+        ? project.worktreeHookTimeoutMs
+        : DEFAULT_WORKTREE_HOOK_TIMEOUT_MS;
+
+    const result = Bun.spawnSync(["zsh", "-lc", command], {
+      cwd: workspacePath,
+      env: {
+        ...this.options.env,
+        COMMAND_CENTER_PROJECT_ID: project.id,
+        COMMAND_CENTER_PROJECT_NAME: project.name,
+        COMMAND_CENTER_PROJECT_PATH: project.path,
+        COMMAND_CENTER_WORKTREE_BRANCH: branchName,
+        COMMAND_CENTER_WORKTREE_PATH: workspacePath,
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+      timeout: timeoutMs,
+      killSignal: "SIGTERM",
+    });
+
+    const timedOut = result.exitedDueToTimeout === true;
+    if (result.exitCode === 0 && !timedOut) {
+      return null;
+    }
+
+    return {
+      command,
+      stdout: textDecoder.decode(result.stdout),
+      stderr: textDecoder.decode(result.stderr),
+      exitCode: typeof result.exitCode === "number" ? result.exitCode : null,
+      timedOut,
+    };
+  }
+
+  private pruneExpiredWorktreeHookDecisions(nowMs = Date.now()): void {
+    for (const [decisionToken, pending] of this.pendingWorktreeHookDecisions.entries()) {
+      if (nowMs - pending.createdAtMs > WORKTREE_HOOK_DECISION_TTL_MS) {
+        this.pendingWorktreeHookDecisions.delete(decisionToken);
+      }
+    }
   }
 
   private cleanupWorktreeResources(projectPath: string, workspacePath: string, branchName: string): void {

@@ -26,6 +26,8 @@ function makeProject(id: string, path: string): ProjectRegistryEntry {
     lastUsedAt: now,
     worktreeEnabled: false,
     worktreeParentPath: null,
+    worktreeHookCommand: null,
+    worktreeHookTimeoutMs: 15_000,
   };
 }
 
@@ -85,7 +87,7 @@ describe("session registry", () => {
     }
   });
 
-  test("migrates v2 registry records to v3 defaults", async () => {
+  test("migrates v2 registry records to v4 defaults", async () => {
     const path = uniqueRegistryPath("migrate");
     const directory = dirname(path);
     mkdirSync(directory, { recursive: true });
@@ -120,12 +122,14 @@ describe("session registry", () => {
 
       expect(project?.worktreeEnabled).toBe(false);
       expect(project?.worktreeParentPath).toBeNull();
+      expect(project?.worktreeHookCommand).toBeNull();
+      expect(project?.worktreeHookTimeoutMs).toBe(15_000);
       expect(session?.workspaceType).toBe("main");
       expect(session?.workspacePath).toBe("/tmp/legacy");
       expect(session?.branchName).toBeNull();
 
       const persisted = JSON.parse(await Bun.file(path).text()) as { version: number };
-      expect(persisted.version).toBe(3);
+      expect(persisted.version).toBe(4);
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }

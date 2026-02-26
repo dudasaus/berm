@@ -52,6 +52,8 @@ Notable behavior:
 - Session names are unique per project
 - Same session name can exist in different projects
 - Worktree sessions use branch name as session ID
+- Optional per-project post-create hook runs in the new worktree before session creation
+- Hook failures pause session creation and require an explicit user decision (abort cleanup or continue)
 - Internal tmux names are derived from `<projectId>__<sessionId>` with sanitization/hash for branch-style IDs
 - Project delete removes all of that project's sessions and kills their tmux sessions
 - Worktree session delete also removes the worktree directory and branch (non-force, safety-first)
@@ -64,10 +66,10 @@ Stored in default path:
 
 - `~/.command-center/sessions.json`
 
-Current schema (version 3):
+Current schema (version 4):
 
 - `projects[]`
-  - includes `worktreeEnabled` and `worktreeParentPath`
+  - includes `worktreeEnabled`, `worktreeParentPath`, `worktreeHookCommand`, `worktreeHookTimeoutMs`
 - `sessions[]`
   - includes `projectId`, `tmuxSessionName`, and workspace metadata:
     - `workspaceType` (`main` or `worktree`)
@@ -79,7 +81,7 @@ Properties:
 - Atomic writes via temp file + rename
 - Auto-create file/directory if missing
 - Invalid JSON backup behavior (`.bak-<timestamp>`)
-- v2 registry data is loaded with defaults for new fields and then saved in v3 format
+- v2/v3 registry data is loaded with defaults for new fields and then saved in v4 format
 
 ## Project Model
 
@@ -91,6 +93,8 @@ A project is defined by:
 - Worktree settings:
   - `worktreeEnabled` (manual toggle)
   - `worktreeParentPath` (absolute existing directory)
+  - `worktreeHookCommand` (optional shell command run after `git worktree add`)
+  - `worktreeHookTimeoutMs` (hook timeout in milliseconds; default 15000)
 
 Validation rules for selection:
 
@@ -108,7 +112,7 @@ Validation rules for selection:
 
 - `GET /api/projects`
 - `POST /api/projects/select` with `{ path }`
-- `PATCH /api/projects/:id` with optional `{ worktreeEnabled, worktreeParentPath }`
+- `PATCH /api/projects/:id` with optional `{ worktreeEnabled, worktreeParentPath, worktreeHookCommand, worktreeHookTimeoutMs }`
 - `POST /api/projects/pick` (native folder picker on macOS)
 - `DELETE /api/projects/:id` (deletes project + all sessions)
 
@@ -118,6 +122,9 @@ Validation rules for selection:
 - `POST /api/projects/:projectId/sessions`
   - Main session: `{ mode: "main", name? }`
   - Worktree session: `{ mode: "worktree", branchName }`
+- `POST /api/projects/:projectId/sessions/worktree-hook-decision`
+  - Resolve failed hook with `{ decisionToken, decision }`
+  - `decision` is `"abort"` (cleanup worktree+branch) or `"continue"` (create tmux session anyway)
 - `GET /api/projects/:projectId/sessions/:id`
 - `DELETE /api/projects/:projectId/sessions/:id`
 
@@ -198,6 +205,18 @@ Worktree mode commands:
 - Delete worktree session resources:
   - `git -C <project.path> worktree remove <worktreePath>`
   - `git -C <project.path> branch -d <branch>`
+
+Optional post-create hook:
+
+- Runs as `zsh -lc "<worktreeHookCommand>"` with cwd set to the new worktree path
+- Receives environment variables:
+  - `COMMAND_CENTER_PROJECT_ID`
+  - `COMMAND_CENTER_PROJECT_NAME`
+  - `COMMAND_CENTER_PROJECT_PATH`
+  - `COMMAND_CENTER_WORKTREE_BRANCH`
+  - `COMMAND_CENTER_WORKTREE_PATH`
+- Non-zero exit code or timeout returns `WORKTREE_HOOK_FAILED` with hook output and a `decisionToken`
+- Client must call the decision endpoint to abort/cleanup or continue creating the session
 
 ## Native Folder Picker
 

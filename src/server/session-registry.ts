@@ -12,6 +12,8 @@ export interface ProjectRegistryEntry {
   lastUsedAt: string;
   worktreeEnabled: boolean;
   worktreeParentPath: string | null;
+  worktreeHookCommand: string | null;
+  worktreeHookTimeoutMs: number;
 }
 
 export interface SessionRegistryEntry {
@@ -25,10 +27,33 @@ export interface SessionRegistryEntry {
   branchName: string | null;
 }
 
-interface SessionRegistryFileV3 {
-  version: number;
+interface SessionRegistryFileV4 {
+  version: 4;
   projects: ProjectRegistryEntry[];
   sessions: SessionRegistryEntry[];
+}
+
+interface SessionRegistryFileV3 {
+  version: 3;
+  projects: Array<{
+    id: string;
+    name: string;
+    path: string;
+    createdAt: string;
+    lastUsedAt: string;
+    worktreeEnabled: boolean;
+    worktreeParentPath: string | null;
+  }>;
+  sessions: Array<{
+    projectId: string;
+    sessionId: string;
+    tmuxSessionName: string;
+    createdAt: string;
+    lastActiveAt: string;
+    workspaceType: SessionWorkspaceType;
+    workspacePath: string;
+    branchName: string | null;
+  }>;
 }
 
 interface SessionRegistryFileV2 {
@@ -54,7 +79,8 @@ export interface SessionRegistryData {
   sessions: Map<string, SessionRegistryEntry>;
 }
 
-const REGISTRY_VERSION = 3;
+const REGISTRY_VERSION = 4;
+const DEFAULT_WORKTREE_HOOK_TIMEOUT_MS = 15_000;
 
 export function defaultSessionRegistryPath(): string {
   return join(homedir(), ".command-center", "sessions.json");
@@ -106,10 +132,10 @@ export function loadSessionRegistry(path: string): SessionRegistryData {
   }
 
   const raw = readFileSync(path, "utf8");
-  let parsed: SessionRegistryFileV3 | SessionRegistryFileV2;
+  let parsed: SessionRegistryFileV4 | SessionRegistryFileV3 | SessionRegistryFileV2;
 
   try {
-    parsed = JSON.parse(raw) as SessionRegistryFileV3 | SessionRegistryFileV2;
+    parsed = JSON.parse(raw) as SessionRegistryFileV4 | SessionRegistryFileV3 | SessionRegistryFileV2;
   } catch {
     const backupPath = `${path}.bak-${Date.now()}`;
     renameSync(path, backupPath);
@@ -118,7 +144,7 @@ export function loadSessionRegistry(path: string): SessionRegistryData {
     return empty;
   }
 
-  if (parsed.version !== 2 && parsed.version !== REGISTRY_VERSION) {
+  if (parsed.version !== 2 && parsed.version !== 3 && parsed.version !== REGISTRY_VERSION) {
     const empty = emptyRegistryData();
     saveSessionRegistry(path, empty);
     return empty;
@@ -149,6 +175,14 @@ export function loadSessionRegistry(path: string): SessionRegistryData {
       lastUsedAt: normalizeDate(project.lastUsedAt, now),
       worktreeEnabled: projectRecord.worktreeEnabled === true,
       worktreeParentPath: normalizeNonEmptyString(projectRecord.worktreeParentPath),
+      worktreeHookCommand: normalizeNonEmptyString(projectRecord.worktreeHookCommand),
+      worktreeHookTimeoutMs:
+        typeof projectRecord.worktreeHookTimeoutMs === "number" &&
+        Number.isFinite(projectRecord.worktreeHookTimeoutMs) &&
+        projectRecord.worktreeHookTimeoutMs >= 1_000 &&
+        projectRecord.worktreeHookTimeoutMs <= 120_000
+          ? Math.floor(projectRecord.worktreeHookTimeoutMs)
+          : DEFAULT_WORKTREE_HOOK_TIMEOUT_MS,
     });
   }
 
@@ -204,7 +238,7 @@ export function saveSessionRegistry(path: string, data: SessionRegistryData): vo
     mkdirSync(directory, { recursive: true });
   }
 
-  const payload: SessionRegistryFileV3 = {
+  const payload: SessionRegistryFileV4 = {
     version: REGISTRY_VERSION,
     projects: [...data.projects.values()].sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id)),
     sessions: [...data.sessions.values()].sort((a, b) => {

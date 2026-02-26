@@ -55,6 +55,8 @@ type ProjectMetadata = {
   lastUsedAt: string;
   worktreeEnabled: boolean;
   worktreeParentPath: string | null;
+  worktreeHookCommand: string | null;
+  worktreeHookTimeoutMs: number;
 };
 
 type SessionMetadata = {
@@ -72,6 +74,38 @@ type SessionMetadata = {
   workspacePath: string;
   branchName: string | null;
 };
+
+type WorktreeHookExecutionDetails = {
+  command: string;
+  stdout: string;
+  stderr: string;
+  exitCode: number | null;
+  timedOut: boolean;
+};
+
+type WorktreeHookFailurePayload = {
+  code: "WORKTREE_HOOK_FAILED";
+  error: string;
+  decisionToken: string;
+  projectId: string;
+  branchName: string;
+  workspacePath: string;
+  hook: WorktreeHookExecutionDetails;
+};
+
+class ApiRequestError extends Error {
+  readonly status: number;
+  readonly code?: string;
+  readonly payload: Record<string, unknown>;
+
+  constructor(message: string, status: number, payload: Record<string, unknown>) {
+    super(message);
+    this.name = "ApiRequestError";
+    this.status = status;
+    this.code = typeof payload.code === "string" ? payload.code : undefined;
+    this.payload = payload;
+  }
+}
 
 async function fetchHealth() {
   const response = await fetch("/api/health");
@@ -162,9 +196,13 @@ async function createSession(
     ),
   });
 
-  const payload = (await response.json()) as SessionMetadata | { error?: string };
+  const payload = (await response.json().catch(() => ({}))) as unknown;
   if (!response.ok) {
-    throw new Error("error" in payload && payload.error ? payload.error : `create session failed with ${response.status}`);
+    const errorPayload =
+      payload && typeof payload === "object" ? (payload as Record<string, unknown>) : {};
+    const message =
+      typeof errorPayload.error === "string" ? errorPayload.error : `create session failed with ${response.status}`;
+    throw new ApiRequestError(message, response.status, errorPayload);
   }
 
   return payload as SessionMetadata;
@@ -174,6 +212,8 @@ async function updateProject(request: {
   projectId: string;
   worktreeEnabled?: boolean;
   worktreeParentPath?: string | null;
+  worktreeHookCommand?: string | null;
+  worktreeHookTimeoutMs?: number;
 }) {
   const response = await fetch(`/api/projects/${encodeURIComponent(request.projectId)}`, {
     method: "PATCH",
@@ -183,6 +223,8 @@ async function updateProject(request: {
     body: JSON.stringify({
       worktreeEnabled: request.worktreeEnabled,
       worktreeParentPath: request.worktreeParentPath,
+      worktreeHookCommand: request.worktreeHookCommand,
+      worktreeHookTimeoutMs: request.worktreeHookTimeoutMs,
     }),
   });
 
@@ -192,6 +234,41 @@ async function updateProject(request: {
   }
 
   return payload as ProjectMetadata;
+}
+
+async function resolveWorktreeHookDecision(request: {
+  projectId: string;
+  decisionToken: string;
+  decision: "abort" | "continue";
+}) {
+  const response = await fetch(
+    `/api/projects/${encodeURIComponent(request.projectId)}/sessions/worktree-hook-decision`,
+    {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        decisionToken: request.decisionToken,
+        decision: request.decision,
+      }),
+    },
+  );
+
+  const payload = (await response.json().catch(() => ({}))) as
+    | { action: "abort"; ok: boolean; cleaned: boolean }
+    | { action: "continue"; session: SessionMetadata }
+    | Record<string, unknown>;
+
+  if (!response.ok) {
+    const message =
+      typeof (payload as { error?: unknown }).error === "string"
+        ? ((payload as { error: string }).error)
+        : `resolve hook decision failed with ${response.status}`;
+    throw new ApiRequestError(message, response.status, payload as Record<string, unknown>);
+  }
+
+  return payload as { action: "abort"; ok: boolean; cleaned: boolean } | { action: "continue"; session: SessionMetadata };
 }
 
 async function deleteSession(request: { projectId: string; sessionId: string }) {
@@ -304,16 +381,6 @@ function promptForBranchName(): string | null {
   return trimmed || null;
 }
 
-function promptForProjectPath(): string | null {
-  const provided = window.prompt("Enter an absolute project directory path:");
-  if (provided === null) {
-    return null;
-  }
-
-  const trimmed = provided.trim();
-  return trimmed || null;
-}
-
 export function TerminalView() {
   const terminalRef = useRef<TerminalPaneHandle | null>(null);
   const queryClient = useQueryClient();
@@ -327,6 +394,9 @@ export function TerminalView() {
   const [isProjectSettingsOpen, setIsProjectSettingsOpen] = useState(false);
   const [projectSettingsWorktreeEnabled, setProjectSettingsWorktreeEnabled] = useState(false);
   const [projectSettingsParentPath, setProjectSettingsParentPath] = useState("");
+  const [projectSettingsHookCommand, setProjectSettingsHookCommand] = useState("");
+  const [projectSettingsHookTimeoutMs, setProjectSettingsHookTimeoutMs] = useState("15000");
+  const [worktreeHookFailure, setWorktreeHookFailure] = useState<WorktreeHookFailurePayload | null>(null);
   const [isStackedLayout, setIsStackedLayout] = useState(() => {
     if (typeof window === "undefined") {
       return false;
@@ -455,12 +525,73 @@ export function TerminalView() {
 
   const createSessionMutation = useMutation({
     mutationFn: createSession,
-    onSuccess: (createdSession) => {
+    onSuccess: (createdSession, request) => {
       setSelectedSessionId(createdSession.id);
+      setWorktreeHookFailure(null);
       toast.success(`Created session ${createdSession.id}`);
+      if (
+        request.mode === "worktree" &&
+        selectedProject?.id === createdSession.projectId &&
+        (selectedProject.worktreeHookCommand?.trim().length ?? 0) > 0
+      ) {
+        toast.success("Worktree hook completed successfully");
+      }
       void queryClient.invalidateQueries({ queryKey: ["sessions", createdSession.projectId] });
     },
     onError: (error) => {
+      if (error instanceof ApiRequestError && error.code === "WORKTREE_HOOK_FAILED") {
+        const payload = error.payload as Partial<WorktreeHookFailurePayload>;
+        if (
+          typeof payload.decisionToken === "string" &&
+          typeof payload.projectId === "string" &&
+          typeof payload.branchName === "string" &&
+          typeof payload.workspacePath === "string" &&
+          payload.hook &&
+          typeof payload.hook === "object"
+        ) {
+          setWorktreeHookFailure({
+            code: "WORKTREE_HOOK_FAILED",
+            error: typeof payload.error === "string" ? payload.error : error.message,
+            decisionToken: payload.decisionToken,
+            projectId: payload.projectId,
+            branchName: payload.branchName,
+            workspacePath: payload.workspacePath,
+            hook: payload.hook as WorktreeHookExecutionDetails,
+          });
+          toast.warning("Worktree hook failed. Choose whether to continue or abort.");
+          return;
+        }
+      }
+
+      toast.error(error instanceof Error ? error.message : String(error));
+    },
+  });
+
+  const resolveWorktreeHookDecisionMutation = useMutation({
+    mutationFn: resolveWorktreeHookDecision,
+    onSuccess: (result, request) => {
+      if (result.action === "continue") {
+        if (selectedProjectId !== result.session.projectId) {
+          setSelectedProjectId(result.session.projectId);
+        }
+        setSelectedSessionId(result.session.id);
+        toast.success(`Created session ${result.session.id} after hook failure`);
+        void queryClient.invalidateQueries({ queryKey: ["sessions", result.session.projectId] });
+      } else {
+        toast.message("Worktree setup aborted and cleaned up");
+        void queryClient.invalidateQueries({ queryKey: ["sessions", request.projectId] });
+      }
+
+      setWorktreeHookFailure(null);
+      void queryClient.invalidateQueries({ queryKey: ["projects"] });
+    },
+    onError: (error) => {
+      if (
+        error instanceof ApiRequestError &&
+        (error.code === "WORKTREE_HOOK_DECISION_NOT_FOUND" || error.code === "WORKTREE_HOOK_DECISION_INVALID")
+      ) {
+        setWorktreeHookFailure(null);
+      }
       toast.error(error instanceof Error ? error.message : String(error));
     },
   });
@@ -498,6 +629,8 @@ export function TerminalView() {
 
     setProjectSettingsWorktreeEnabled(selectedProject.worktreeEnabled);
     setProjectSettingsParentPath(selectedProject.worktreeParentPath ?? "");
+    setProjectSettingsHookCommand(selectedProject.worktreeHookCommand ?? "");
+    setProjectSettingsHookTimeoutMs(String(selectedProject.worktreeHookTimeoutMs ?? 15_000));
   }, [selectedProject]);
 
   useEffect(() => {
@@ -603,15 +736,6 @@ export function TerminalView() {
     }
   }, [selectedSession]);
 
-  const handleSelectProjectPath = () => {
-    const path = promptForProjectPath();
-    if (!path) {
-      return;
-    }
-
-    selectProjectMutation.mutate(path);
-  };
-
   const handlePickProject = async () => {
     try {
       const path = await pickProjectPath();
@@ -648,6 +772,8 @@ export function TerminalView() {
 
     setProjectSettingsWorktreeEnabled(selectedProject.worktreeEnabled);
     setProjectSettingsParentPath(selectedProject.worktreeParentPath ?? "");
+    setProjectSettingsHookCommand(selectedProject.worktreeHookCommand ?? "");
+    setProjectSettingsHookTimeoutMs(String(selectedProject.worktreeHookTimeoutMs ?? 15_000));
     setIsProjectSettingsOpen(true);
   };
 
@@ -670,10 +796,24 @@ export function TerminalView() {
     }
 
     const parentPath = projectSettingsParentPath.trim();
+    const hookCommand = projectSettingsHookCommand.trim();
+    const parsedTimeout = Number(projectSettingsHookTimeoutMs.trim());
+    if (
+      !Number.isFinite(parsedTimeout) ||
+      Math.floor(parsedTimeout) !== parsedTimeout ||
+      parsedTimeout < 1_000 ||
+      parsedTimeout > 120_000
+    ) {
+      toast.error("Hook timeout must be an integer between 1000 and 120000 milliseconds");
+      return;
+    }
+
     updateProjectMutation.mutate({
       projectId: selectedProject.id,
       worktreeEnabled: projectSettingsWorktreeEnabled,
       worktreeParentPath: parentPath ? parentPath : null,
+      worktreeHookCommand: hookCommand ? hookCommand : null,
+      worktreeHookTimeoutMs: parsedTimeout,
     });
   };
 
@@ -735,6 +875,18 @@ export function TerminalView() {
     }
 
     deleteSessionMutation.mutate({ projectId: selectedProjectId, sessionId });
+  };
+
+  const handleWorktreeHookDecision = (decision: "abort" | "continue") => {
+    if (!worktreeHookFailure) {
+      return;
+    }
+
+    resolveWorktreeHookDecisionMutation.mutate({
+      projectId: worktreeHookFailure.projectId,
+      decisionToken: worktreeHookFailure.decisionToken,
+      decision,
+    });
   };
 
   const moveSession = (sessionId: string, direction: -1 | 1) => {
@@ -846,14 +998,6 @@ export function TerminalView() {
                         <Button
                           size="sm"
                           variant="outline"
-                          onClick={handleSelectProjectPath}
-                          disabled={selectProjectMutation.isPending || deleteProjectMutation.isPending}
-                        >
-                          Enter path
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant="outline"
                           onClick={handleOpenProjectSettings}
                           disabled={!selectedProject}
                         >
@@ -878,6 +1022,10 @@ export function TerminalView() {
                           </p>
                           <p className="truncate font-mono text-[11px] text-muted-foreground">
                             parent {selectedProject.worktreeParentPath ?? "not set"}
+                          </p>
+                          <p className="truncate font-mono text-[11px] text-muted-foreground">
+                            hook {selectedProject.worktreeHookCommand ? "configured" : "not set"} · timeout{" "}
+                            {selectedProject.worktreeHookTimeoutMs}ms
                           </p>
                         </div>
                       ) : null}
@@ -1242,6 +1390,39 @@ export function TerminalView() {
                 </div>
               </div>
 
+              <div className="space-y-1.5">
+                <p className="font-mono text-[11px] uppercase tracking-wide text-muted-foreground">Post-create hook command</p>
+                <textarea
+                  value={projectSettingsHookCommand}
+                  onChange={(event) => {
+                    setProjectSettingsHookCommand(event.currentTarget.value);
+                  }}
+                  placeholder="Optional. Runs in the new worktree after creation."
+                  rows={4}
+                  className="w-full rounded-md border border-border bg-background px-2 py-1.5 font-mono text-xs outline-none focus:border-primary/60"
+                />
+                <p className="font-mono text-[11px] text-muted-foreground">
+                  Environment: COMMAND_CENTER_PROJECT_ID, COMMAND_CENTER_PROJECT_NAME, COMMAND_CENTER_PROJECT_PATH,
+                  COMMAND_CENTER_WORKTREE_BRANCH, COMMAND_CENTER_WORKTREE_PATH.
+                </p>
+              </div>
+
+              <div className="space-y-1.5">
+                <p className="font-mono text-[11px] uppercase tracking-wide text-muted-foreground">Hook timeout (ms)</p>
+                <input
+                  type="number"
+                  value={projectSettingsHookTimeoutMs}
+                  onChange={(event) => {
+                    setProjectSettingsHookTimeoutMs(event.currentTarget.value);
+                  }}
+                  min={1000}
+                  max={120000}
+                  step={1000}
+                  className="w-full rounded-md border border-border bg-background px-2 py-1.5 font-mono text-xs outline-none focus:border-primary/60"
+                />
+                <p className="font-mono text-[11px] text-muted-foreground">Allowed range: 1000 to 120000 ms.</p>
+              </div>
+
               <div className="flex justify-end gap-2">
                 <Button
                   type="button"
@@ -1261,6 +1442,82 @@ export function TerminalView() {
                   disabled={updateProjectMutation.isPending}
                 >
                   Save
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      ) : null}
+
+      {worktreeHookFailure ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4">
+          <Card className="w-full max-w-2xl border-border/80 bg-card shadow-xl">
+            <CardHeader className="space-y-1 pb-3">
+              <CardTitle className="text-base">Worktree Hook Failed</CardTitle>
+              <CardDescription className="font-mono text-xs">
+                Branch {worktreeHookFailure.branchName} at {worktreeHookFailure.workspacePath}
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="space-y-1">
+                <p className="font-mono text-[11px] uppercase tracking-wide text-muted-foreground">Command</p>
+                <pre className="overflow-x-auto rounded-md border border-border bg-background p-2 font-mono text-xs">
+                  {worktreeHookFailure.hook.command}
+                </pre>
+              </div>
+
+              <div className="grid gap-3 md:grid-cols-2">
+                <div className="space-y-1">
+                  <p className="font-mono text-[11px] uppercase tracking-wide text-muted-foreground">stdout</p>
+                  <pre className="max-h-44 overflow-auto rounded-md border border-border bg-background p-2 font-mono text-xs">
+                    {worktreeHookFailure.hook.stdout || "(empty)"}
+                  </pre>
+                </div>
+                <div className="space-y-1">
+                  <p className="font-mono text-[11px] uppercase tracking-wide text-muted-foreground">stderr</p>
+                  <pre className="max-h-44 overflow-auto rounded-md border border-border bg-background p-2 font-mono text-xs">
+                    {worktreeHookFailure.hook.stderr || "(empty)"}
+                  </pre>
+                </div>
+              </div>
+
+              <p className="font-mono text-[11px] text-muted-foreground">
+                Exit code: {worktreeHookFailure.hook.exitCode ?? "none"} · timed out:{" "}
+                {worktreeHookFailure.hook.timedOut ? "yes" : "no"}
+              </p>
+
+              <div className="flex justify-end gap-2">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => {
+                    setWorktreeHookFailure(null);
+                  }}
+                  disabled={resolveWorktreeHookDecisionMutation.isPending}
+                >
+                  Dismiss
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => {
+                    handleWorktreeHookDecision("abort");
+                  }}
+                  disabled={resolveWorktreeHookDecisionMutation.isPending}
+                >
+                  Abort and clean up
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  onClick={() => {
+                    handleWorktreeHookDecision("continue");
+                  }}
+                  disabled={resolveWorktreeHookDecisionMutation.isPending}
+                >
+                  Continue anyway
                 </Button>
               </div>
             </CardContent>

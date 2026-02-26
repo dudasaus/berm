@@ -3,6 +3,8 @@ import { serializeMessage, type ServerMessage } from "../shared/protocol";
 import {
   type CreateSessionRequest,
   type ProjectMetadata,
+  type ResolveWorktreeHookDecisionRequest,
+  type ResolveWorktreeHookDecisionResult,
   type SessionMetadata,
   TerminalSessionManager,
   type UpdateProjectRequest,
@@ -24,6 +26,7 @@ export interface SessionManagerLike {
   getProject(projectId: string): ProjectMetadata | null;
   listSessions(projectId: string): SessionMetadata[];
   createSession(projectId: string, request?: CreateSessionRequest): SessionMetadata;
+  resolveWorktreeHookDecision(projectId: string, request: ResolveWorktreeHookDecisionRequest): ResolveWorktreeHookDecisionResult;
   deleteSession(projectId: string, sessionId: string): boolean;
   hasSession(projectId: string, sessionId: string): boolean;
   attachClient(projectId: string, sessionId: string, client: SessionClient): SessionMetadata | null;
@@ -79,7 +82,14 @@ export function buildSessionResponse(
 
 function errorResponse(error: unknown): Response {
   if (isSessionManagerError(error)) {
-    return Response.json({ error: error.message, code: error.code }, { status: error.statusCode });
+    return Response.json(
+      {
+        error: error.message,
+        code: error.code,
+        ...(error.details ?? {}),
+      },
+      { status: error.statusCode },
+    );
   }
 
   return Response.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });
@@ -214,6 +224,29 @@ export function createServerConfig(
 
             const session = manager.createSession(req.params.projectId, request);
             return Response.json(session, { status: 201 });
+          } catch (error) {
+            return errorResponse(error);
+          }
+        },
+      },
+      "/api/projects/:projectId/sessions/worktree-hook-decision": {
+        POST: async (req: Bun.BunRequest<"/api/projects/:projectId/sessions/worktree-hook-decision">) => {
+          try {
+            const body = (await req.json().catch(() => ({}))) as {
+              decisionToken?: unknown;
+              decision?: unknown;
+            };
+
+            const result = manager.resolveWorktreeHookDecision(req.params.projectId, {
+              decisionToken: typeof body.decisionToken === "string" ? body.decisionToken : "",
+              decision: body.decision as ResolveWorktreeHookDecisionRequest["decision"],
+            });
+
+            if (result.action === "continue") {
+              return Response.json(result, { status: 201 });
+            }
+
+            return Response.json(result);
           } catch (error) {
             return errorResponse(error);
           }

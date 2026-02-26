@@ -6,8 +6,11 @@ import {
   TerminalSessionManager,
   type CreateSessionRequest,
   type ProjectMetadata,
+  type ResolveWorktreeHookDecisionRequest,
+  type ResolveWorktreeHookDecisionResult,
   type SessionClient,
   type SessionMetadata,
+  type UpdateProjectRequest,
 } from "../../src/server/terminal-session";
 import { parseServerMessage } from "../../src/shared/protocol";
 
@@ -32,6 +35,7 @@ class FakeSessionManager implements SessionManagerLike {
   handledMessages: Array<{ projectId: string; sessionId: string; clientId: string; rawMessage: unknown }> = [];
   detachEvents: Array<{ projectId: string; sessionId: string; clientId: string }> = [];
   attachShouldFail = false;
+  pendingHookFailures = new Map<string, { projectId: string; branchName: string; workspacePath: string }>();
 
   constructor() {
     const project: ProjectMetadata = {
@@ -42,6 +46,8 @@ class FakeSessionManager implements SessionManagerLike {
       lastUsedAt: nowIso(),
       worktreeEnabled: false,
       worktreeParentPath: null,
+      worktreeHookCommand: null,
+      worktreeHookTimeoutMs: 15_000,
     };
     this.projects.set(project.id, project);
   }
@@ -59,12 +65,14 @@ class FakeSessionManager implements SessionManagerLike {
       lastUsedAt: nowIso(),
       worktreeEnabled: false,
       worktreeParentPath: null,
+      worktreeHookCommand: null,
+      worktreeHookTimeoutMs: 15_000,
     };
     this.projects.set(project.id, project);
     return project;
   }
 
-  updateProject(projectId: string, input: { worktreeEnabled?: boolean; worktreeParentPath?: string | null }): ProjectMetadata {
+  updateProject(projectId: string, input: UpdateProjectRequest): ProjectMetadata {
     if (projectId === "explode") {
       throw new Error("synthetic failure");
     }
@@ -79,6 +87,12 @@ class FakeSessionManager implements SessionManagerLike {
       worktreeEnabled: input.worktreeEnabled ?? project.worktreeEnabled,
       worktreeParentPath:
         typeof input.worktreeParentPath === "undefined" ? project.worktreeParentPath : input.worktreeParentPath,
+      worktreeHookCommand:
+        typeof input.worktreeHookCommand === "undefined"
+          ? project.worktreeHookCommand
+          : input.worktreeHookCommand,
+      worktreeHookTimeoutMs:
+        typeof input.worktreeHookTimeoutMs === "number" ? input.worktreeHookTimeoutMs : project.worktreeHookTimeoutMs,
       lastUsedAt: nowIso(),
     };
     this.projects.set(projectId, updated);
@@ -144,6 +158,25 @@ class FakeSessionManager implements SessionManagerLike {
 
   hasSession(projectId: string, sessionId: string): boolean {
     return this.sessions.has(sessionKey(projectId, sessionId));
+  }
+
+  resolveWorktreeHookDecision(
+    projectId: string,
+    request: ResolveWorktreeHookDecisionRequest,
+  ): ResolveWorktreeHookDecisionResult {
+    const pending = this.pendingHookFailures.get(request.decisionToken);
+    if (!pending || pending.projectId !== projectId) {
+      throw new Error("pending decision not found");
+    }
+
+    if (request.decision === "abort") {
+      this.pendingHookFailures.delete(request.decisionToken);
+      return { action: "abort", ok: true, cleaned: true };
+    }
+
+    const session = this.createSession(projectId, { mode: "worktree", branchName: pending.branchName });
+    this.pendingHookFailures.delete(request.decisionToken);
+    return { action: "continue", session };
   }
 
   attachClient(projectId: string, sessionId: string, _client: SessionClient): SessionMetadata | null {
@@ -227,6 +260,45 @@ describe("server config routes and websocket", () => {
       ),
     );
     expect(createWorktreeResponse.status).toBe(201);
+
+    manager.pendingHookFailures.set("hook-token-abort", {
+      projectId: "p1",
+      branchName: "feature/hook-abort",
+      workspacePath: "/tmp/worktree/feature-hook-abort",
+    });
+    const resolveAbortResponse = await (routes["/api/projects/:projectId/sessions/worktree-hook-decision"] as {
+      POST: (req: Bun.BunRequest<"/api/projects/:projectId/sessions/worktree-hook-decision">) => Promise<Response>;
+    }).POST(
+      makeRequest<"/api/projects/:projectId/sessions/worktree-hook-decision">(
+        { projectId: "p1" },
+        { decisionToken: "hook-token-abort", decision: "abort" },
+      ),
+    );
+    expect(resolveAbortResponse.status).toBe(200);
+    const resolveAbortPayload = (await resolveAbortResponse.json()) as { action: string; ok?: boolean };
+    expect(resolveAbortPayload.action).toBe("abort");
+    expect(resolveAbortPayload.ok).toBe(true);
+
+    manager.pendingHookFailures.set("hook-token-continue", {
+      projectId: "p1",
+      branchName: "feature/hook-continue",
+      workspacePath: "/tmp/worktree/feature-hook-continue",
+    });
+    const resolveContinueResponse = await (routes["/api/projects/:projectId/sessions/worktree-hook-decision"] as {
+      POST: (req: Bun.BunRequest<"/api/projects/:projectId/sessions/worktree-hook-decision">) => Promise<Response>;
+    }).POST(
+      makeRequest<"/api/projects/:projectId/sessions/worktree-hook-decision">(
+        { projectId: "p1" },
+        { decisionToken: "hook-token-continue", decision: "continue" },
+      ),
+    );
+    expect(resolveContinueResponse.status).toBe(201);
+    const resolveContinuePayload = (await resolveContinueResponse.json()) as {
+      action: string;
+      session?: { id: string };
+    };
+    expect(resolveContinuePayload.action).toBe("continue");
+    expect(resolveContinuePayload.session?.id).toBe("feature/hook-continue");
 
     const listSessionsResponse = (routes["/api/projects/:projectId/sessions"] as {
       GET: (req: Bun.BunRequest<"/api/projects/:projectId/sessions">) => Response;

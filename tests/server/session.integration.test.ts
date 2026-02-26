@@ -413,6 +413,126 @@ describe("TerminalSessionManager (tmux, projects)", () => {
     expect(branchLookup.stdout).toBe("");
   });
 
+  test("supports continue decision after worktree hook failure", () => {
+    const context = createContext("worktree-hook-continue");
+    if (!context.manager.isTmuxAvailable() || !isGitAvailable()) {
+      return;
+    }
+
+    const repoPath = createGitProjectPath("worktree-hook-continue-repo");
+    const worktreeParentPath = createProjectPath("worktree-hook-continue-parent");
+    context.projectPaths.push(repoPath, worktreeParentPath);
+
+    const project = context.manager.selectProject(repoPath);
+    context.manager.updateProject(project.id, {
+      worktreeEnabled: true,
+      worktreeParentPath,
+      worktreeHookCommand: "echo hook-stdout; echo hook-stderr >&2; exit 13",
+      worktreeHookTimeoutMs: 15_000,
+    });
+
+    const branchName = `hook-continue-${uniqueSuffix()}`;
+    let thrown: unknown = null;
+    try {
+      context.manager.createSession(project.id, { mode: "worktree", branchName });
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(isSessionManagerError(thrown)).toBe(true);
+    if (!isSessionManagerError(thrown)) {
+      return;
+    }
+    expect(thrown.code).toBe("WORKTREE_HOOK_FAILED");
+
+    const details = (thrown.details ?? {}) as Record<string, unknown>;
+    const decisionToken = typeof details.decisionToken === "string" ? details.decisionToken : "";
+    const workspacePath = typeof details.workspacePath === "string" ? details.workspacePath : "";
+    const hook = (details.hook ?? {}) as Record<string, unknown>;
+
+    expect(decisionToken.length).toBeGreaterThan(0);
+    expect(workspacePath.length).toBeGreaterThan(0);
+    expect(existsSync(workspacePath)).toBe(true);
+    expect(typeof hook.command === "string" && hook.command.length > 0).toBe(true);
+    expect(typeof hook.stdout === "string" && hook.stdout.includes("hook-stdout")).toBe(true);
+    expect(typeof hook.stderr === "string" && hook.stderr.includes("hook-stderr")).toBe(true);
+
+    let continueResult: ReturnType<TerminalSessionManager["resolveWorktreeHookDecision"]>;
+    try {
+      continueResult = context.manager.resolveWorktreeHookDecision(project.id, {
+        decisionToken,
+        decision: "continue",
+      });
+    } catch (error) {
+      if (shouldSkipTmux(error)) {
+        return;
+      }
+      throw error;
+    }
+    expect(continueResult.action).toBe("continue");
+    if (continueResult.action === "continue") {
+      expect(continueResult.session.id).toBe(branchName);
+      expect(continueResult.session.workspaceType).toBe("worktree");
+      expect(continueResult.session.branchName).toBe(branchName);
+      expect(continueResult.session.workspacePath).toBe(workspacePath);
+    }
+
+    const deleted = context.manager.deleteSession(project.id, branchName);
+    expect(deleted).toBe(true);
+    expect(existsSync(workspacePath)).toBe(false);
+  });
+
+  test("supports abort decision after worktree hook failure", () => {
+    const context = createContext("worktree-hook-abort");
+    if (!context.manager.isTmuxAvailable() || !isGitAvailable()) {
+      return;
+    }
+
+    const repoPath = createGitProjectPath("worktree-hook-abort-repo");
+    const worktreeParentPath = createProjectPath("worktree-hook-abort-parent");
+    context.projectPaths.push(repoPath, worktreeParentPath);
+
+    const project = context.manager.selectProject(repoPath);
+    context.manager.updateProject(project.id, {
+      worktreeEnabled: true,
+      worktreeParentPath,
+      worktreeHookCommand: "echo hook-abort >&2; exit 7",
+      worktreeHookTimeoutMs: 15_000,
+    });
+
+    const branchName = `hook-abort-${uniqueSuffix()}`;
+    let thrown: unknown = null;
+    try {
+      context.manager.createSession(project.id, { mode: "worktree", branchName });
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(isSessionManagerError(thrown)).toBe(true);
+    if (!isSessionManagerError(thrown)) {
+      return;
+    }
+    expect(thrown.code).toBe("WORKTREE_HOOK_FAILED");
+
+    const details = (thrown.details ?? {}) as Record<string, unknown>;
+    const decisionToken = typeof details.decisionToken === "string" ? details.decisionToken : "";
+    const workspacePath = typeof details.workspacePath === "string" ? details.workspacePath : "";
+    expect(decisionToken.length).toBeGreaterThan(0);
+    expect(workspacePath.length).toBeGreaterThan(0);
+    expect(existsSync(workspacePath)).toBe(true);
+
+    const abortResult = context.manager.resolveWorktreeHookDecision(project.id, {
+      decisionToken,
+      decision: "abort",
+    });
+    expect(abortResult).toEqual({ action: "abort", ok: true, cleaned: true });
+    expect(existsSync(workspacePath)).toBe(false);
+
+    const branchLookup = runGit(repoPath, ["branch", "--list", branchName]);
+    expect(branchLookup.exitCode).toBe(0);
+    expect(branchLookup.stdout).toBe("");
+  });
+
   test("rejects worktree session creation when branch already exists", () => {
     const context = createContext("worktree-existing-branch");
     if (!context.manager.isTmuxAvailable() || !isGitAvailable()) {
