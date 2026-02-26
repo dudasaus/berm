@@ -1,0 +1,311 @@
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef } from "react";
+import { FitAddon } from "@xterm/addon-fit";
+import { Terminal } from "xterm";
+
+import { parseServerMessage, serializeMessage, type ClientMessage, type TerminalStatusState } from "../../../shared/protocol";
+
+const TERMINAL_BG = "#1f1811";
+
+export type TerminalConnectionState = "connecting" | "connected" | "disconnected";
+
+export interface TerminalPaneHandle {
+  clear: () => void;
+  reset: () => void;
+  reconnect: () => void;
+}
+
+interface TerminalPaneProps {
+  sessionId: string;
+  onConnectionStateChange: (state: TerminalConnectionState) => void;
+  onTerminalStateChange: (state: TerminalStatusState) => void;
+}
+
+function wsUrl(sessionId: string) {
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  return `${protocol}//${window.location.host}/ws/terminal?sessionId=${encodeURIComponent(sessionId)}`;
+}
+
+export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
+  ({ sessionId, onConnectionStateChange, onTerminalStateChange }, ref) => {
+    const mountRef = useRef<HTMLDivElement | null>(null);
+    const terminalRef = useRef<Terminal | null>(null);
+    const fitAddonRef = useRef<FitAddon | null>(null);
+    const socketRef = useRef<WebSocket | null>(null);
+    const reconnectTimerRef = useRef<number | null>(null);
+    const pingTimerRef = useRef<number | null>(null);
+    const resizeObserverRef = useRef<ResizeObserver | null>(null);
+    const resizeRafRef = useRef<number | null>(null);
+    const disposedRef = useRef(false);
+
+    const desiredStateRef = useRef<"connected" | "closed">("connected");
+
+    const sendMessage = useCallback((message: ClientMessage) => {
+      const socket = socketRef.current;
+      if (!socket || socket.readyState !== WebSocket.OPEN) {
+        return;
+      }
+
+      socket.send(serializeMessage(message));
+    }, []);
+
+    const sendResize = useCallback(() => {
+      const terminal = terminalRef.current;
+      if (!terminal) {
+        return;
+      }
+      sendMessage({ type: "resize", cols: terminal.cols, rows: terminal.rows });
+    }, [sendMessage]);
+
+    const safeFitAndResize = useCallback(() => {
+      if (disposedRef.current) {
+        return;
+      }
+
+      const mount = mountRef.current;
+      const terminal = terminalRef.current;
+      const fitAddon = fitAddonRef.current;
+      if (!mount || !mount.isConnected || !terminal || !fitAddon) {
+        return;
+      }
+
+      const bounds = mount.getBoundingClientRect();
+      if (bounds.width < 8 || bounds.height < 8) {
+        return;
+      }
+
+      try {
+        fitAddon.fit();
+      } catch {
+        return;
+      }
+
+      sendResize();
+    }, [sendResize]);
+
+    const reconnect = useCallback(() => {
+      if (reconnectTimerRef.current) {
+        window.clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
+
+      const socket = socketRef.current;
+      if (socket && socket.readyState <= WebSocket.OPEN) {
+        socket.onopen = null;
+        socket.onmessage = null;
+        socket.onclose = null;
+        socket.onerror = null;
+        socket.close(1000, "Client reconnect");
+      }
+
+      const nextSocket = new WebSocket(wsUrl(sessionId));
+      socketRef.current = nextSocket;
+      onConnectionStateChange("connecting");
+
+      nextSocket.onopen = () => {
+        if (socketRef.current !== nextSocket) {
+          return;
+        }
+        onConnectionStateChange("connected");
+        safeFitAndResize();
+
+        pingTimerRef.current = window.setInterval(() => {
+          sendMessage({ type: "ping", ts: Date.now() });
+        }, 25_000);
+      };
+
+      nextSocket.onmessage = (event) => {
+        if (socketRef.current !== nextSocket) {
+          return;
+        }
+        const parsed = parseServerMessage(event.data);
+        if (!parsed.ok) {
+          terminalRef.current?.writeln(`\r\n[protocol-error] ${parsed.error}`);
+          return;
+        }
+
+        const message = parsed.value;
+        if (message.type === "output") {
+          terminalRef.current?.write(message.data);
+          return;
+        }
+
+        if (message.type === "status") {
+          onTerminalStateChange(message.state);
+          return;
+        }
+
+        if (message.type === "exit") {
+          terminalRef.current?.writeln(`\r\n[process-exit] code=${message.code ?? "null"}`);
+          return;
+        }
+
+        if (message.type === "error") {
+          terminalRef.current?.writeln(`\r\n[server-error] ${message.message}`);
+        }
+      };
+
+      nextSocket.onclose = () => {
+        if (socketRef.current !== nextSocket) {
+          return;
+        }
+
+        if (pingTimerRef.current) {
+          window.clearInterval(pingTimerRef.current);
+          pingTimerRef.current = null;
+        }
+
+        onConnectionStateChange("disconnected");
+
+        if (desiredStateRef.current === "closed") {
+          return;
+        }
+
+        reconnectTimerRef.current = window.setTimeout(() => {
+          reconnect();
+        }, 1_200);
+      };
+    }, [onConnectionStateChange, onTerminalStateChange, safeFitAndResize, sendMessage, sessionId]);
+
+    useImperativeHandle(
+      ref,
+      () => ({
+        clear() {
+          terminalRef.current?.clear();
+        },
+        reset() {
+          sendMessage({ type: "reset" });
+        },
+        reconnect,
+      }),
+      [reconnect, sendMessage],
+    );
+
+    const terminalOptions = useMemo(
+      () => ({
+        fontFamily: '"JetBrains Mono", "Fira Code", monospace',
+        fontSize: 13,
+        lineHeight: 1.2,
+        cursorBlink: true,
+        convertEol: true,
+        theme: {
+          background: TERMINAL_BG,
+          foreground: "#f7e8d6",
+          cursor: "#f5b26a",
+          selectionBackground: "#704f3042",
+          black: "#2f241a",
+          red: "#d27862",
+          green: "#b1d38d",
+          yellow: "#e6cb79",
+          blue: "#9ab4d6",
+          magenta: "#c49cc7",
+          cyan: "#7bbbc3",
+          white: "#f4eee4",
+          brightBlack: "#6f6255",
+          brightRed: "#e9a093",
+          brightGreen: "#c7e8a5",
+          brightYellow: "#f4dd98",
+          brightBlue: "#b6cae8",
+          brightMagenta: "#dab9df",
+          brightCyan: "#9ad2d8",
+          brightWhite: "#fff9f2",
+        },
+      }),
+      [],
+    );
+
+    useEffect(() => {
+      disposedRef.current = false;
+      desiredStateRef.current = "connected";
+
+      const mount = mountRef.current;
+      if (!mount) {
+        return;
+      }
+
+      const terminal = new Terminal(terminalOptions);
+      const fitAddon = new FitAddon();
+      terminal.loadAddon(fitAddon);
+      terminal.open(mount);
+      terminalRef.current = terminal;
+      fitAddonRef.current = fitAddon;
+      safeFitAndResize();
+
+      const onDataDispose = terminal.onData((data) => {
+        sendMessage({ type: "input", data });
+      });
+
+      resizeObserverRef.current = new ResizeObserver(() => {
+        if (resizeRafRef.current) {
+          window.cancelAnimationFrame(resizeRafRef.current);
+        }
+        resizeRafRef.current = window.requestAnimationFrame(() => {
+          safeFitAndResize();
+        });
+      });
+      resizeObserverRef.current.observe(mount);
+
+      let removeFontListeners: (() => void) | undefined;
+      if ("fonts" in document) {
+        const fonts = document.fonts;
+        const onFontsChanged = () => {
+          safeFitAndResize();
+        };
+
+        void fonts.ready.then(onFontsChanged);
+        fonts.addEventListener("loadingdone", onFontsChanged);
+        fonts.addEventListener("loadingerror", onFontsChanged);
+
+        removeFontListeners = () => {
+          fonts.removeEventListener("loadingdone", onFontsChanged);
+          fonts.removeEventListener("loadingerror", onFontsChanged);
+        };
+      }
+
+      reconnect();
+
+      return () => {
+        disposedRef.current = true;
+        desiredStateRef.current = "closed";
+
+        if (reconnectTimerRef.current) {
+          window.clearTimeout(reconnectTimerRef.current);
+        }
+
+        if (pingTimerRef.current) {
+          window.clearInterval(pingTimerRef.current);
+        }
+
+        if (resizeRafRef.current) {
+          window.cancelAnimationFrame(resizeRafRef.current);
+          resizeRafRef.current = null;
+        }
+
+        const socket = socketRef.current;
+        if (socket && socket.readyState <= WebSocket.OPEN) {
+          socket.onopen = null;
+          socket.onmessage = null;
+          socket.onclose = null;
+          socket.onerror = null;
+          socket.close(1000, "Component unmount");
+        }
+
+        resizeObserverRef.current?.disconnect();
+        removeFontListeners?.();
+        onDataDispose.dispose();
+        terminal.dispose();
+        terminalRef.current = null;
+        fitAddonRef.current = null;
+      };
+    }, [reconnect, safeFitAndResize, sendMessage, terminalOptions]);
+
+    return (
+      <div
+        ref={mountRef}
+        className="h-full min-h-[420px] w-full overflow-hidden rounded-md bg-[#1f1811]"
+        style={{ backgroundColor: TERMINAL_BG }}
+      />
+    );
+  },
+);
+
+TerminalPane.displayName = "TerminalPane";
