@@ -104,3 +104,8 @@ bun --hot ./index.ts
 ```
 
 For more information, read the Bun API docs in `node_modules/bun-types/docs/**.mdx`.
+
+## Documentation Maintenance
+
+- Before creating a commit, review `docs/README.md` and update it if architecture, APIs, data models, workflows, or key components changed.
+- If a change affects usage or setup, also review and update the root `README.md` in the same commit.
