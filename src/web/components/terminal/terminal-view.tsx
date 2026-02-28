@@ -18,6 +18,7 @@ import {
   RefreshCw,
   Search,
   Settings2,
+  Maximize2,
   Trash2,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -72,6 +73,7 @@ import type { TerminalStatusState } from "../../../shared/protocol";
 const STACK_LAYOUT_BREAKPOINT_PX = 1100;
 const SELECTED_PROJECT_STORAGE_KEY = "command-center.selected-project-id";
 const HEADER_VISIBLE_STORAGE_KEY = "command-center.header-visible";
+const WIDE_MODE_STORAGE_KEY = "command-center.wide-mode";
 const PALETTE_GROUP_ORDER: TerminalActionGroup[] = ["Session", "Project", "View"];
 
 function selectedSessionStorageKey(projectId: string) {
@@ -523,6 +525,14 @@ function readStoredHeaderVisible(): boolean {
   return true;
 }
 
+function readStoredWideMode(): boolean {
+  if (typeof window === "undefined") {
+    return false;
+  }
+
+  return window.localStorage.getItem(WIDE_MODE_STORAGE_KEY) === "true";
+}
+
 function promptForOptionalSessionName(): string | undefined | null {
   const provided = window.prompt(
     "Enter a session name (letters, numbers, underscores, hyphens). Leave blank for auto-generated.",
@@ -621,6 +631,8 @@ function renderActionIcon(icon: TerminalActionIcon) {
       return <Eye className="h-4 w-4" />;
     case "eye-closed":
       return <EyeOff className="h-4 w-4" />;
+    case "expand":
+      return <Maximize2 className="h-4 w-4" />;
     default: {
       const neverIcon: never = icon;
       throw new Error(`Unknown icon '${neverIcon as string}'`);
@@ -647,6 +659,7 @@ export function TerminalView() {
   const [projectSettingsHookTimeoutMs, setProjectSettingsHookTimeoutMs] = useState("15000");
   const [worktreeHookFailure, setWorktreeHookFailure] = useState<WorktreeHookFailurePayload | null>(null);
   const [hookOutputDialog, setHookOutputDialog] = useState<HookOutputDialogState | null>(null);
+  const [isWideMode, setIsWideMode] = useState(() => readStoredWideMode());
   const [isHeaderVisible, setIsHeaderVisible] = useState(() => readStoredHeaderVisible());
   const [isStackedLayout, setIsStackedLayout] = useState(() => {
     if (typeof window === "undefined") {
@@ -780,6 +793,10 @@ export function TerminalView() {
   useEffect(() => {
     window.localStorage.setItem(HEADER_VISIBLE_STORAGE_KEY, isHeaderVisible ? "true" : "false");
   }, [isHeaderVisible]);
+
+  useEffect(() => {
+    window.localStorage.setItem(WIDE_MODE_STORAGE_KEY, isWideMode ? "true" : "false");
+  }, [isWideMode]);
 
   const healthQuery = useQuery({
     queryKey: ["health"],
@@ -1317,6 +1334,7 @@ export function TerminalView() {
       selectedSessionId,
       selectedSessionName: selectedSession?.id ?? null,
       selectedSessionLifecycleState: selectedSession?.lifecycleState ?? null,
+      isWideMode,
       isHeaderVisible,
       pending: {
         pickProject: selectProjectMutation.isPending,
@@ -1331,6 +1349,7 @@ export function TerminalView() {
       deleteProjectMutation.isPending,
       deleteSessionMutation.isPending,
       isHeaderVisible,
+      isWideMode,
       selectedProject,
       selectedProjectId,
       selectedSession,
@@ -1361,6 +1380,9 @@ export function TerminalView() {
     deleteSession: deleteSessionById,
     reconnectSession: reconnectSelectedSession,
     setSessionLifecycleState: setSessionLifecycleStateById,
+    toggleWideMode: () => {
+      setIsWideMode((current) => !current);
+    },
     hideHeader: () => {
       setIsHeaderVisible(false);
     },
@@ -1443,10 +1465,13 @@ export function TerminalView() {
   };
 
   const connectionBadgeText = selectedSession ? connectionState : "no-session";
+  const mainLayoutClass = isWideMode
+    ? "mx-auto flex h-[100dvh] min-h-screen w-full max-w-none flex-col gap-3 px-2 py-3 md:gap-4 md:px-2 md:py-4"
+    : "mx-auto flex h-[100dvh] min-h-screen w-full max-w-[1500px] flex-col gap-3 px-3 py-3 md:gap-4 md:px-6 md:py-4";
 
   return (
     <TooltipProvider delayDuration={150}>
-      <main className="mx-auto flex h-[100dvh] min-h-screen w-full max-w-[1500px] flex-col gap-3 px-3 py-3 md:gap-4 md:px-6 md:py-4">
+      <main className={mainLayoutClass}>
         {isHeaderVisible ? (
           <header className="rounded-xl border border-border bg-card/70 px-4 py-2.5 shadow-sm backdrop-blur-sm">
             <div className="flex flex-wrap items-center justify-between gap-2">

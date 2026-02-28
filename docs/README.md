@@ -172,6 +172,7 @@ Responsibilities:
   - delete session
   - reconnect
   - set session lifecycle state (`planning`, `exploration`, `implementing`, `in review`, `submitted PR`, `merged`, `blocked`, `paused`)
+  - toggle wide mode (full-width layout with minimal side padding)
   - hide header / show header
 - Renders session lifecycle badges and "time in state" in the session list
 - Supports per-session lifecycle updates from both command palette and session-row dropdown menu
@@ -214,6 +215,7 @@ Stored in web storage:
 - Selected session ID per project in `sessionStorage`
 - Session order per project in `localStorage`
 - Header visibility in `localStorage` (`command-center.header-visible`)
+- Wide mode in `localStorage` (`command-center.wide-mode`)
 
 This keeps ordering and selection stable while allowing independent state per project.
 

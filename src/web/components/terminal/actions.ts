@@ -14,6 +14,7 @@ export type TerminalActionId =
   | "session.delete.current"
   | "session.reconnect"
   | SessionLifecycleActionId
+  | "view.toggle-wide-mode"
   | "view.hide-header"
   | "view.show-header";
 
@@ -31,6 +32,7 @@ export type TerminalActionIcon =
   | "merged"
   | "blocked"
   | "paused"
+  | "expand"
   | "eye-open"
   | "eye-closed";
 export type TerminalActionSource = "palette" | "button" | "dropdown" | "row" | "fallback";
@@ -60,6 +62,7 @@ export interface TerminalActionContext {
   selectedSessionId: string | null;
   selectedSessionName: string | null;
   selectedSessionLifecycleState: SessionLifecycleState | null;
+  isWideMode: boolean;
   isHeaderVisible: boolean;
   pending: {
     pickProject: boolean;
@@ -82,6 +85,7 @@ export interface TerminalActionHandlers {
     sessionId: string;
     lifecycleState: SessionLifecycleState;
   }) => void;
+  toggleWideMode: () => void;
   hideHeader: () => void;
   showHeader: () => void;
 }
@@ -334,6 +338,20 @@ export const TERMINAL_ACTIONS: TerminalActionDefinition[] = [
         return;
       }
       handlers.deleteProject(projectId);
+    },
+  },
+  {
+    id: "view.toggle-wide-mode",
+    label: "Toggle Wide Mode",
+    description: "Toggle full-width layout with minimal side padding.",
+    group: "View",
+    icon: "expand",
+    keywords: ["view", "layout", "wide", "full width", "padding"],
+    getAvailability: () => {
+      return { enabled: true };
+    },
+    run: (_context, handlers) => {
+      handlers.toggleWideMode();
     },
   },
   {
