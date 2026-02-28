@@ -28,6 +28,47 @@ function wsUrl(projectId: string, sessionId: string) {
   return `${protocol}//${window.location.host}/ws/terminal?projectId=${encodeURIComponent(projectId)}&sessionId=${encodeURIComponent(sessionId)}`;
 }
 
+function suppressPendingViewportRefresh(terminal: Terminal): void {
+  const core = (
+    terminal as unknown as {
+      _core?: {
+        viewport?: {
+          _refreshAnimationFrame?: number | null;
+          _refresh?: (immediate: boolean) => void;
+          _innerRefresh?: () => void;
+          syncScrollArea?: (immediate?: boolean) => void;
+        };
+        _viewport?: {
+          _refreshAnimationFrame?: number | null;
+          _refresh?: (immediate: boolean) => void;
+          _innerRefresh?: () => void;
+          syncScrollArea?: (immediate?: boolean) => void;
+        };
+      };
+    }
+  )._core;
+
+  const viewport = (
+    core?.viewport ??
+    core?._viewport
+  );
+
+  if (!viewport) {
+    return;
+  }
+
+  if (typeof viewport._refreshAnimationFrame === "number" && viewport._refreshAnimationFrame >= 0) {
+    window.cancelAnimationFrame(viewport._refreshAnimationFrame);
+    viewport._refreshAnimationFrame = null;
+  }
+
+  viewport.syncScrollArea = () => {};
+  viewport._refresh = () => {};
+  if (typeof viewport._innerRefresh === "function") {
+    viewport._innerRefresh = () => {};
+  }
+}
+
 export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
   ({ projectId, sessionId, onConnectionStateChange, onTerminalStateChange, onSessionUnavailable }, ref) => {
     const mountRef = useRef<HTMLDivElement | null>(null);
@@ -358,6 +399,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
         onDataDispose?.dispose();
         if (initialized && activeTerminal) {
           try {
+            suppressPendingViewportRefresh(activeTerminal);
             activeTerminal.dispose();
           } catch {
             // Prevent dispose race from crashing unmount.
