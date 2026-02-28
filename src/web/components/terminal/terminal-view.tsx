@@ -922,6 +922,12 @@ export function TerminalView() {
         return;
       }
 
+      if (isCommandOpen) {
+        event.preventDefault();
+        closeCommandPalette();
+        return;
+      }
+
       if (isTextEntryTarget(event.target) && !isTerminalTarget(event.target)) {
         return;
       }
@@ -931,11 +937,7 @@ export function TerminalView() {
       }
 
       event.preventDefault();
-      if (isCommandOpen) {
-        closeCommandPalette();
-      } else {
-        openCommandPalette();
-      }
+      openCommandPalette();
     };
 
     window.addEventListener("keydown", handleKeyDown, true);
@@ -1534,7 +1536,7 @@ export function TerminalView() {
                 <RefreshCw className="h-4 w-4" />
               </span>
               <span className="font-medium">Reconnect</span>
-              <CommandShortcut>{commandHotkeyLabel}</CommandShortcut>
+              <CommandShortcut>Enter</CommandShortcut>
             </CommandItem>
           </CommandGroup>
           <CommandSeparator />

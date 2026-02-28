@@ -9,7 +9,7 @@ import { Dialog, DialogContent, DialogDescription, DialogTitle } from "./dialog"
 function CommandDialog({ children, ...props }: DialogProps) {
   return (
     <Dialog {...props}>
-      <DialogContent className="max-w-xl overflow-hidden border-border/80 bg-card/95 p-0 shadow-2xl backdrop-blur-sm">
+      <DialogContent showCloseButton={false} className="max-w-xl overflow-hidden border-border/80 bg-card/95 p-0 shadow-2xl backdrop-blur-sm">
         <DialogTitle className="sr-only">Command Palette</DialogTitle>
         <DialogDescription className="sr-only">Run session and workspace commands.</DialogDescription>
         <Command
