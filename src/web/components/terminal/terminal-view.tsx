@@ -1,13 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  Command as CommandIcon,
   ChevronDown,
   ChevronUp,
-  Command,
   FolderOpen,
   Plus,
   RefreshCw,
-  RotateCcw,
   Settings2,
   Trash2,
 } from "lucide-react";
@@ -16,6 +15,16 @@ import { toast } from "sonner";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../ui/card";
+import {
+  CommandDialog,
+  CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList,
+  CommandSeparator,
+  CommandShortcut,
+} from "../ui/command";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -440,8 +449,26 @@ function toHookExecutionDetails(value: unknown): WorktreeHookExecutionDetails | 
   };
 }
 
+function isTextEntryTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) {
+    return false;
+  }
+
+  if (target.isContentEditable) {
+    return true;
+  }
+
+  const tagName = target.tagName.toLowerCase();
+  return tagName === "input" || tagName === "textarea" || target.closest("[contenteditable='true']") !== null;
+}
+
+function isTerminalTarget(target: EventTarget | null): boolean {
+  return target instanceof HTMLElement && target.closest(".xterm") !== null;
+}
+
 export function TerminalView() {
   const terminalRef = useRef<TerminalPaneHandle | null>(null);
+  const commandPreviousFocusRef = useRef<HTMLElement | null>(null);
   const queryClient = useQueryClient();
 
   const [connectionState, setConnectionState] = useState<TerminalConnectionState>("disconnected");
@@ -464,6 +491,68 @@ export function TerminalView() {
     }
     return window.matchMedia(`(max-width: ${STACK_LAYOUT_BREAKPOINT_PX}px)`).matches;
   });
+  const [isCommandOpen, setIsCommandOpen] = useState(false);
+  const commandHotkeyLabel = useMemo(() => {
+    if (typeof navigator === "undefined") {
+      return "Ctrl+K";
+    }
+    return /Mac|iPhone|iPad|iPod/.test(navigator.platform) ? "⌘K" : "Ctrl+K";
+  }, []);
+
+  const rememberCommandFocusTarget = useCallback(() => {
+    if (typeof document === "undefined") {
+      return;
+    }
+
+    const activeElement = document.activeElement;
+    commandPreviousFocusRef.current = activeElement instanceof HTMLElement ? activeElement : null;
+  }, []);
+
+  const restoreCommandFocusTarget = useCallback(() => {
+    const target = commandPreviousFocusRef.current;
+    commandPreviousFocusRef.current = null;
+
+    if (!target || !target.isConnected) {
+      return;
+    }
+
+    window.requestAnimationFrame(() => {
+      try {
+        target.focus({ preventScroll: true });
+      } catch {
+        target.focus();
+      }
+    });
+  }, []);
+
+  const openCommandPalette = useCallback(() => {
+    rememberCommandFocusTarget();
+    setIsCommandOpen(true);
+  }, [rememberCommandFocusTarget]);
+
+  const closeCommandPalette = useCallback(() => {
+    setIsCommandOpen(false);
+    restoreCommandFocusTarget();
+  }, [restoreCommandFocusTarget]);
+
+  const handleCommandOpenChange = useCallback(
+    (nextOpen: boolean) => {
+      if (nextOpen) {
+        if (!isCommandOpen) {
+          rememberCommandFocusTarget();
+          setIsCommandOpen(true);
+        }
+        return;
+      }
+
+      if (isCommandOpen) {
+        closeCommandPalette();
+      } else {
+        restoreCommandFocusTarget();
+      }
+    },
+    [closeCommandPalette, isCommandOpen, rememberCommandFocusTarget, restoreCommandFocusTarget],
+  );
 
   useEffect(() => {
     const mediaQuery = window.matchMedia(`(max-width: ${STACK_LAYOUT_BREAKPOINT_PX}px)`);
@@ -821,8 +910,39 @@ export function TerminalView() {
   useEffect(() => {
     if (!selectedSession) {
       setConnectionState("disconnected");
+      if (isCommandOpen) {
+        closeCommandPalette();
+      }
     }
-  }, [selectedSession]);
+  }, [closeCommandPalette, isCommandOpen, selectedSession]);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key.toLowerCase() !== "k" || (!event.metaKey && !event.ctrlKey) || event.shiftKey || event.altKey) {
+        return;
+      }
+
+      if (isTextEntryTarget(event.target) && !isTerminalTarget(event.target)) {
+        return;
+      }
+
+      if (!selectedSession) {
+        return;
+      }
+
+      event.preventDefault();
+      if (isCommandOpen) {
+        closeCommandPalette();
+      } else {
+        openCommandPalette();
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown, true);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown, true);
+    };
+  }, [closeCommandPalette, isCommandOpen, openCommandPalette, selectedSession]);
 
   const handlePickProject = async () => {
     try {
@@ -1006,6 +1126,16 @@ export function TerminalView() {
     [queryClient, selectedProjectId],
   );
 
+  const handleReconnectCommand = useCallback(() => {
+    if (!selectedSession) {
+      return;
+    }
+
+    terminalRef.current?.reconnect();
+    toast.info("Reconnecting socket...");
+    closeCommandPalette();
+  }, [closeCommandPalette, selectedSession]);
+
   const connectionBadgeText = selectedSession ? connectionState : "no-session";
 
   return (
@@ -1042,7 +1172,7 @@ export function TerminalView() {
         >
           <ResizablePanel defaultSize={isStackedLayout ? 36 : 28} minSize={isStackedLayout ? 25 : 20} className="min-h-0">
             <Card className="flex h-full min-h-0 flex-col rounded-none border-0 bg-transparent shadow-none">
-              <CardContent className="min-h-0 flex-1 space-y-4 overflow-y-auto pr-1 pt-3">
+              <CardContent className="min-h-0 flex-1 space-y-4 overflow-y-auto p-3">
                 <section className="rounded-md border border-border bg-card/60 p-2">
                   <button
                     type="button"
@@ -1144,8 +1274,6 @@ export function TerminalView() {
                     </div>
                   ) : null}
                 </section>
-
-                <Separator />
 
                 <section className="rounded-md border border-border bg-card/60 p-2">
                   <button
@@ -1316,74 +1444,29 @@ export function TerminalView() {
 
                     <div className="grid gap-2 font-mono text-xs text-muted-foreground">
                       <div className="flex justify-between">
-                        <span>pid</span>
-                        <span>{selectedSession.pid ?? "--"}</span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span>size</span>
-                        <span>
-                          {selectedSession.cols} x {selectedSession.rows}
-                        </span>
-                      </div>
-                      <div className="flex justify-between">
                         <span>attached clients</span>
                         <span>{selectedSession.attachedClients}</span>
                       </div>
                     </div>
 
                     <div className="flex flex-wrap gap-2">
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <Button
-                            size="sm"
-                            variant="secondary"
-                            onClick={() => {
-                              terminalRef.current?.reconnect();
-                              toast.info("Reconnecting socket...");
-                            }}
-                            disabled={!selectedSession}
-                          >
-                            <RefreshCw className="h-4 w-4" />
-                            Reconnect
-                          </Button>
-                        </TooltipTrigger>
-                        <TooltipContent>Reconnect WebSocket to selected session</TooltipContent>
-                      </Tooltip>
-
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="border-border/80 bg-card/75 pr-1 font-mono"
+                        onClick={() => {
+                          openCommandPalette();
+                        }}
+                        disabled={!selectedSession}
+                      >
+                        <CommandIcon className="h-4 w-4" />
+                        Commands
+                        <span className="ml-1 rounded-sm border border-border/70 bg-card px-1.5 py-0.5 text-[10px] leading-none text-muted-foreground">
+                          {commandHotkeyLabel}
+                        </span>
+                      </Button>
                     </div>
 
-                    <DropdownMenu>
-                      <DropdownMenuTrigger asChild>
-                        <Button size="sm" variant="ghost" className="w-full justify-between" disabled={!selectedSession}>
-                          <span className="inline-flex items-center gap-2">
-                            <Command className="h-4 w-4" />
-                            Session Actions
-                          </span>
-                          <RotateCcw className="h-4 w-4" />
-                        </Button>
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent align="start" className="w-56">
-                        <DropdownMenuLabel>Shell</DropdownMenuLabel>
-                        <DropdownMenuSeparator />
-                        <DropdownMenuItem
-                          onSelect={() => {
-                            terminalRef.current?.reset();
-                            toast.warning("Session reset requested");
-                          }}
-                        >
-                          Reset selected session
-                        </DropdownMenuItem>
-                        <DropdownMenuItem
-                          onSelect={() => {
-                            if (selectedSession) {
-                              handleDeleteSession(selectedSession.id);
-                            }
-                          }}
-                        >
-                          Delete selected session
-                        </DropdownMenuItem>
-                      </DropdownMenuContent>
-                    </DropdownMenu>
                   </>
                 ) : null}
               </CardContent>
@@ -1421,6 +1504,43 @@ export function TerminalView() {
           </ResizablePanel>
         </ResizablePanelGroup>
       </main>
+
+      <CommandDialog open={isCommandOpen} onOpenChange={handleCommandOpenChange}>
+        <div className="border-b border-border/70 bg-muted/15 px-4 py-3">
+          <div className="flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <p className="truncate font-heading text-base text-foreground">Session Commands</p>
+              <p className="truncate font-mono text-[11px] text-muted-foreground">
+                {selectedSession ? selectedSession.id : "No session selected"}
+              </p>
+            </div>
+            <span className="rounded-md border border-border/70 bg-card px-2 py-1 font-mono text-[10px] tracking-wide text-muted-foreground">
+              {commandHotkeyLabel}
+            </span>
+          </div>
+        </div>
+        <CommandInput placeholder="Type a command..." />
+        <CommandList>
+          <CommandEmpty>No matching commands.</CommandEmpty>
+          <CommandGroup heading="Session">
+            <CommandItem
+              className="group"
+              onSelect={() => {
+                handleReconnectCommand();
+              }}
+              disabled={!selectedSession}
+            >
+              <span className="flex h-7 w-7 items-center justify-center rounded-sm border border-border/70 bg-card/60 text-muted-foreground transition-colors group-data-[selected=true]:border-primary/35 group-data-[selected=true]:bg-primary/12 group-data-[selected=true]:text-primary">
+                <RefreshCw className="h-4 w-4" />
+              </span>
+              <span className="font-medium">Reconnect</span>
+              <CommandShortcut>{commandHotkeyLabel}</CommandShortcut>
+            </CommandItem>
+          </CommandGroup>
+          <CommandSeparator />
+          <div className="px-3 pb-2 pt-2 font-mono text-[11px] text-muted-foreground">Press Esc to close.</div>
+        </CommandList>
+      </CommandDialog>
 
       {isProjectSettingsOpen && selectedProject ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4">

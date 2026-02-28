@@ -160,6 +160,7 @@ Responsibilities:
 - Manages per-project manual session ordering
 - Renders left control pane and right terminal pane
 - Exposes project actions (pick, enter path, settings, delete)
+- Exposes a session command palette (`Cmd/Ctrl+K`) for session-scoped actions like reconnect
 - Includes a modal for per-project worktree settings
 
 Left pane structure:
