@@ -2091,7 +2091,7 @@ export function TerminalView() {
         {isHeaderVisible ? (
           <header className="rounded-xl border border-border bg-card/70 px-4 py-2.5 shadow-sm backdrop-blur-sm">
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <h1 className="font-heading text-xl tracking-tight">Command Center</h1>
+              <h1 className="font-heading text-xl tracking-tight">Berm</h1>
 
               <div className="flex flex-wrap items-center gap-2">
                 <Badge variant={badgeVariantForConnection(selectedConnectionState)} className="font-mono uppercase tracking-wide">

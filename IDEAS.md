@@ -1,4 +1,4 @@
-# Command Center Ideas
+# Berm Ideas
 
 This is a high-volume feature backlog for future planning. It mixes near-term pragmatic wins with bigger bets.
 
@@ -45,7 +45,7 @@ This is a high-volume feature backlog for future planning. It mixes near-term pr
 
 ## tmux interoperability
 
-- Import external tmux sessions into Command Center.
+- Import external tmux sessions into Berm.
 - Discover and attach to all tmux sessions on a socket.
 - One-click convert imported tmux session to managed session metadata.
 - Detach from app without killing tmux session.

@@ -149,7 +149,7 @@ function pickProjectDirectory(): Response {
     [
       "osascript",
       "-e",
-      'POSIX path of (choose folder with prompt "Select Command Center Project")',
+      'POSIX path of (choose folder with prompt "Select Berm Project")',
     ],
     {
       stdout: "pipe",
@@ -639,5 +639,5 @@ export function createServer(options: number | CreateServerOptions = {}) {
 
 if (import.meta.main) {
   const { server } = createServer();
-  console.log(`Command Center listening at ${server.url}`);
+  console.log(`Berm listening at ${server.url}`);
 }

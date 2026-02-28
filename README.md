@@ -1,4 +1,6 @@
-# command-center
+# Berm
+
+Berm helps you keep your flow: maintain speed through a line while staying in control at high velocity across multiple terminals, agents, and tasks.
 
 Web terminal app powered by Bun PTY + zsh on the backend and TanStack React + xterm.js + shadcn/ui on the frontend.
 

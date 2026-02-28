@@ -1,10 +1,10 @@
-# Command Center Architecture
+# Berm Architecture
 
-This document summarizes the current architecture and key components of Command Center.
+This document summarizes the current architecture and key components of Berm.
 
 ## Overview
 
-Command Center is a Bun-based web terminal application that:
+Berm is a Bun-based web terminal application that:
 
 - Uses tmux + zsh on the backend
 - Streams terminal I/O over WebSocket
