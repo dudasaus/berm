@@ -1456,11 +1456,6 @@ export function TerminalView() {
       seen.add(slotSessionId);
     }
 
-    if (selectedSessionId && sessionById.has(selectedSessionId) && !seen.has(selectedSessionId)) {
-      next[0] = selectedSessionId;
-      seen.add(selectedSessionId);
-    }
-
     for (const session of orderedSessions) {
       if (seen.has(session.id)) {
         continue;
@@ -1476,7 +1471,12 @@ export function TerminalView() {
     }
 
     return next;
-  }, [orderedSessions, selectedSessionId, sessionById, workspaceSlots]);
+  }, [orderedSessions, sessionById, workspaceSlots]);
+  const actionTargetSessionId = activeWorkspaceSessionId ?? selectedSessionId;
+  const actionTargetSession = useMemo(
+    () => (actionTargetSessionId ? (sessionById.get(actionTargetSessionId) ?? null) : null),
+    [actionTargetSessionId, sessionById],
+  );
   const selectedConnectionState = selectedSession
     ? (connectionBySessionId[selectedSession.id] ?? "disconnected")
     : "disconnected";
@@ -1586,22 +1586,6 @@ export function TerminalView() {
     const maxPaneIndex = workspacePaneCount - 1;
     setFocusedWorkspaceSlot((current) => (current !== null && current > maxPaneIndex ? null : current));
   }, [workspacePaneCount]);
-
-  useEffect(() => {
-    if (!selectedSessionId || !sessionById.has(selectedSessionId)) {
-      return;
-    }
-
-    setWorkspaceSlots((previous) => {
-      if (previous.includes(selectedSessionId)) {
-        return previous;
-      }
-
-      const next = Array.from({ length: MAX_WORKSPACE_SLOTS }, (_unused, index) => previous[index] ?? null);
-      next[0] = selectedSessionId;
-      return next;
-    });
-  }, [selectedSessionId, sessionById]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -1934,21 +1918,21 @@ export function TerminalView() {
   );
 
   const reconnectSelectedSession = useCallback(() => {
-    if (!selectedSession) {
+    if (!actionTargetSession) {
       return;
     }
 
-    terminalRefs.current[selectedSession.id]?.reconnect();
+    terminalRefs.current[actionTargetSession.id]?.reconnect();
     toast.info("Reconnecting socket...");
-  }, [selectedSession]);
+  }, [actionTargetSession]);
 
   const actionContext = useMemo<TerminalActionContext>(
     () => ({
       selectedProjectId,
       selectedProjectName: selectedProject?.name ?? null,
-      selectedSessionId,
-      selectedSessionName: selectedSession?.id ?? null,
-      selectedSessionLifecycleState: selectedSession?.lifecycleState ?? null,
+      selectedSessionId: actionTargetSession?.id ?? null,
+      selectedSessionName: actionTargetSession?.id ?? null,
+      selectedSessionLifecycleState: actionTargetSession?.lifecycleState ?? null,
       isWideMode,
       isHeaderVisible,
       pending: {
@@ -1967,8 +1951,7 @@ export function TerminalView() {
       isWideMode,
       selectedProject,
       selectedProjectId,
-      selectedSession,
-      selectedSessionId,
+      actionTargetSession,
       selectProjectMutation.isPending,
       updateSessionLifecycleMutation.isPending,
     ],
@@ -2895,6 +2878,7 @@ export function TerminalView() {
                                   projectId={selectedProjectId}
                                   sessionId={session.id}
                                   onActivate={() => {
+                                    setSelectedSessionId(session.id);
                                     setActiveWorkspaceSessionId(session.id);
                                   }}
                                   onConnectionStateChange={(state) => {
@@ -2971,8 +2955,10 @@ export function TerminalView() {
             <div className="min-w-0">
               <p className="truncate font-heading text-base text-foreground">Command Palette</p>
               <p className="truncate font-mono text-[11px] text-muted-foreground">
-                {selectedProject ? selectedProject.name : "No project selected"} ·{" "}
-                {selectedSession ? selectedSession.id : "No session selected"}
+                {selectedProject ? selectedProject.name : "No project selected"}
+              </p>
+              <p className="truncate font-mono text-[11px] text-muted-foreground">
+                Acts on {actionTargetSession ? actionTargetSession.id : "no active slot session"}
               </p>
             </div>
             <span className="rounded-md border border-border/70 bg-card px-2 py-1 font-mono text-[10px] tracking-wide text-muted-foreground">

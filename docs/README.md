@@ -174,6 +174,7 @@ Responsibilities:
 - Supports cross-project pinned session board for quick switching
 - Renders per-session PR/CI sync badges in session rows and workspace slot headers
 - Renders workspace slot state badges (`Focused`, `Active`, `Live`) with tooltips
+- Routes default session actions through the active slot session (shown in command palette header)
 - Exposes project actions (pick, enter path, settings, delete)
 - Uses a shared frontend action registry so commands can be invoked from both UI controls and command palette
 - Exposes a global command palette (`Cmd/Ctrl+K`) with session commands first, then project commands:
