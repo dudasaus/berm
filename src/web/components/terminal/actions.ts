@@ -274,7 +274,6 @@ export const TERMINAL_ACTIONS: TerminalActionDefinition[] = [
     group: "Session",
     icon: "refresh",
     keywords: ["session", "reconnect", "socket", "websocket"],
-    paletteShortcut: "Enter",
     getAvailability: (context, invocation) => {
       if (!resolveSessionId(context, invocation)) {
         return { enabled: false, disabledReason: "Select a session first" };
