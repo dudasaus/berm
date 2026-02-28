@@ -1091,10 +1091,6 @@ export function TerminalView() {
   }, [selectedProjectId, workspacePresets]);
 
   useEffect(() => {
-    setActiveWorkspaceSessionId(selectedSessionId);
-  }, [selectedSessionId]);
-
-  useEffect(() => {
     window.localStorage.setItem(WORKSPACE_BOARD_STORAGE_KEY, JSON.stringify(workspaceBoard));
   }, [workspaceBoard]);
 
@@ -1472,7 +1468,49 @@ export function TerminalView() {
 
     return next;
   }, [orderedSessions, sessionById, workspaceSlots]);
-  const actionTargetSessionId = activeWorkspaceSessionId ?? selectedSessionId;
+  const visibleWorkspaceSlotIndexes = useMemo(() => {
+    const focusedSlotHasSession =
+      focusedWorkspaceSlot !== null &&
+      focusedWorkspaceSlot < workspacePaneCount &&
+      Boolean(resolvedWorkspaceSlots[focusedWorkspaceSlot]);
+
+    if (focusedSlotHasSession && focusedWorkspaceSlot !== null) {
+      return [focusedWorkspaceSlot];
+    }
+
+    return Array.from({ length: workspacePaneCount }, (_unused, index) => index);
+  }, [focusedWorkspaceSlot, resolvedWorkspaceSlots, workspacePaneCount]);
+  const activeVisibleSlotIndex = useMemo(() => {
+    const findSlotBySessionId = (sessionId: string | null) => {
+      if (!sessionId) {
+        return -1;
+      }
+      return visibleWorkspaceSlotIndexes.findIndex(
+        (slotIndex) => (resolvedWorkspaceSlots[slotIndex] ?? null) === sessionId,
+      );
+    };
+
+    const activeIndex = findSlotBySessionId(activeWorkspaceSessionId);
+    if (activeIndex >= 0) {
+      return visibleWorkspaceSlotIndexes[activeIndex] ?? 0;
+    }
+
+    const selectedIndex = findSlotBySessionId(selectedSessionId);
+    if (selectedIndex >= 0) {
+      return visibleWorkspaceSlotIndexes[selectedIndex] ?? 0;
+    }
+
+    const populatedIndex = visibleWorkspaceSlotIndexes.find(
+      (slotIndex) => Boolean(resolvedWorkspaceSlots[slotIndex] ?? null),
+    );
+    if (typeof populatedIndex === "number") {
+      return populatedIndex;
+    }
+
+    return visibleWorkspaceSlotIndexes[0] ?? 0;
+  }, [activeWorkspaceSessionId, resolvedWorkspaceSlots, selectedSessionId, visibleWorkspaceSlotIndexes]);
+  const activeVisibleSlotSessionId = resolvedWorkspaceSlots[activeVisibleSlotIndex] ?? null;
+  const actionTargetSessionId = activeVisibleSlotSessionId ?? activeWorkspaceSessionId ?? selectedSessionId;
   const actionTargetSession = useMemo(
     () => (actionTargetSessionId ? (sessionById.get(actionTargetSessionId) ?? null) : null),
     [actionTargetSessionId, sessionById],
@@ -1871,6 +1909,24 @@ export function TerminalView() {
       return next;
     });
   }, []);
+
+  const activateSessionFromSessionList = useCallback(
+    (sessionId: string) => {
+      const visibleSlot = visibleWorkspaceSlotIndexes.find(
+        (slotIndex) => (resolvedWorkspaceSlots[slotIndex] ?? null) === sessionId,
+      );
+      if (typeof visibleSlot === "number") {
+        setSelectedSessionId(sessionId);
+        setActiveWorkspaceSessionId(sessionId);
+        return;
+      }
+
+      setWorkspaceSlotSession(activeVisibleSlotIndex, sessionId);
+      setSelectedSessionId(sessionId);
+      setActiveWorkspaceSessionId(sessionId);
+    },
+    [activeVisibleSlotIndex, resolvedWorkspaceSlots, setWorkspaceSlotSession, visibleWorkspaceSlotIndexes],
+  );
 
   const saveWorkspacePreset = useCallback(() => {
     const provided = window.prompt("Save workspace layout as:");
@@ -2350,12 +2406,7 @@ export function TerminalView() {
                                     type="button"
                                     className="min-w-0 flex-1 text-left"
                                     onClick={() => {
-                                      setSelectedSessionId(session.id);
-                                      addSessionToWorkspace(session.id);
-                                      const slotIndex = resolvedWorkspaceSlots.findIndex((sessionId) => sessionId === session.id);
-                                      if (slotIndex >= 0) {
-                                        setFocusedWorkspaceSlot(slotIndex);
-                                      }
+                                      activateSessionFromSessionList(session.id);
                                     }}
                                   >
                                     <p className="truncate font-mono text-sm font-semibold">{session.id}</p>
@@ -2735,7 +2786,7 @@ export function TerminalView() {
                         const slotSessionId = resolvedWorkspaceSlots[slotIndex] ?? "";
                         const slotSessionSync = session ? (sessionGitHubSyncById.get(session.id) ?? null) : null;
                         const isFocusedSlot = focusedWorkspaceSlot === slotIndex;
-                        const isActiveSlot = Boolean(session && session.id === activeWorkspaceSessionId);
+                        const isActiveSlot = Boolean(session) && slotIndex === activeVisibleSlotIndex;
                         const slotContainerClass = isFocusedSlot
                           ? "flex min-h-0 flex-col overflow-hidden rounded-md border-2 border-amber-300 bg-[#2b1a0b] shadow-[0_0_0_1px_rgba(252,211,77,0.55),0_16px_34px_rgba(0,0,0,0.42)]"
                           : isActiveSlot
