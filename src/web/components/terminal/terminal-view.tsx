@@ -74,7 +74,16 @@ const STACK_LAYOUT_BREAKPOINT_PX = 1100;
 const SELECTED_PROJECT_STORAGE_KEY = "command-center.selected-project-id";
 const HEADER_VISIBLE_STORAGE_KEY = "command-center.header-visible";
 const WIDE_MODE_STORAGE_KEY = "command-center.wide-mode";
+const MAX_WORKSPACE_SLOTS = 4;
 const PALETTE_GROUP_ORDER: TerminalActionGroup[] = ["Session", "Project", "View"];
+
+type WorkspaceLayoutMode = "single" | "split" | "quad";
+
+type WorkspaceLayoutPreset = {
+  name: string;
+  layout: WorkspaceLayoutMode;
+  slots: Array<string | null>;
+};
 
 function selectedSessionStorageKey(projectId: string) {
   return `command-center.selected-session-id.${projectId}`;
@@ -82,6 +91,18 @@ function selectedSessionStorageKey(projectId: string) {
 
 function sessionOrderStorageKey(projectId: string) {
   return `command-center.session-order.${projectId}`;
+}
+
+function workspaceLayoutStorageKey(projectId: string) {
+  return `command-center.workspace-layout.${projectId}`;
+}
+
+function workspaceSlotsStorageKey(projectId: string) {
+  return `command-center.workspace-slots.${projectId}`;
+}
+
+function workspacePresetsStorageKey(projectId: string) {
+  return `command-center.workspace-presets.${projectId}`;
 }
 
 type ProjectMetadata = {
@@ -533,6 +554,87 @@ function readStoredWideMode(): boolean {
   return window.localStorage.getItem(WIDE_MODE_STORAGE_KEY) === "true";
 }
 
+function readStoredWorkspaceLayout(projectId: string): WorkspaceLayoutMode {
+  if (typeof window === "undefined") {
+    return "single";
+  }
+
+  const raw = window.localStorage.getItem(workspaceLayoutStorageKey(projectId));
+  if (raw === "split" || raw === "quad" || raw === "single") {
+    return raw;
+  }
+
+  return "single";
+}
+
+function readStoredWorkspaceSlots(projectId: string): Array<string | null> {
+  if (typeof window === "undefined") {
+    return [];
+  }
+
+  const raw = window.localStorage.getItem(workspaceSlotsStorageKey(projectId));
+  if (!raw) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+
+    return parsed
+      .slice(0, MAX_WORKSPACE_SLOTS)
+      .map((value) => (typeof value === "string" && value.trim().length > 0 ? value : null));
+  } catch {
+    return [];
+  }
+}
+
+function readStoredWorkspacePresets(projectId: string): WorkspaceLayoutPreset[] {
+  if (typeof window === "undefined") {
+    return [];
+  }
+
+  const raw = window.localStorage.getItem(workspacePresetsStorageKey(projectId));
+  if (!raw) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+
+    return parsed
+      .map((value) => {
+        if (!value || typeof value !== "object") {
+          return null;
+        }
+
+        const preset = value as Partial<WorkspaceLayoutPreset>;
+        const layout =
+          preset.layout === "single" || preset.layout === "split" || preset.layout === "quad" ? preset.layout : null;
+        const name = typeof preset.name === "string" ? preset.name.trim() : "";
+        if (!layout || !name) {
+          return null;
+        }
+
+        const slots = Array.isArray(preset.slots)
+          ? preset.slots
+              .slice(0, MAX_WORKSPACE_SLOTS)
+              .map((slot) => (typeof slot === "string" && slot.trim().length > 0 ? slot : null))
+          : [];
+
+        return { name, layout, slots };
+      })
+      .filter((preset): preset is WorkspaceLayoutPreset => preset !== null);
+  } catch {
+    return [];
+  }
+}
+
 function promptForOptionalSessionName(): string | undefined | null {
   const provided = window.prompt(
     "Enter a session name (letters, numbers, underscores, hyphens). Leave blank for auto-generated.",
@@ -640,16 +742,44 @@ function renderActionIcon(icon: TerminalActionIcon) {
   }
 }
 
+function paneCountForLayout(layout: WorkspaceLayoutMode): number {
+  switch (layout) {
+    case "single":
+      return 1;
+    case "split":
+      return 2;
+    case "quad":
+      return 4;
+    default: {
+      const neverLayout: never = layout;
+      throw new Error(`Unknown workspace layout '${neverLayout as string}'`);
+    }
+  }
+}
+
+function slotsEqual(a: Array<string | null>, b: Array<string | null>): boolean {
+  for (let index = 0; index < MAX_WORKSPACE_SLOTS; index += 1) {
+    if ((a[index] ?? null) !== (b[index] ?? null)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 export function TerminalView() {
-  const terminalRef = useRef<TerminalPaneHandle | null>(null);
+  const terminalRefs = useRef<Record<string, TerminalPaneHandle | null>>({});
   const commandPreviousFocusRef = useRef<HTMLElement | null>(null);
   const queryClient = useQueryClient();
 
-  const [connectionState, setConnectionState] = useState<TerminalConnectionState>("disconnected");
-  const [terminalState, setTerminalState] = useState<TerminalStatusState>("starting");
+  const [connectionBySessionId, setConnectionBySessionId] = useState<Record<string, TerminalConnectionState>>({});
+  const [terminalStateBySessionId, setTerminalStateBySessionId] = useState<Record<string, TerminalStatusState>>({});
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(() => readStoredProjectId());
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [sessionOrder, setSessionOrder] = useState<string[]>([]);
+  const [workspaceLayout, setWorkspaceLayout] = useState<WorkspaceLayoutMode>("single");
+  const [workspaceSlots, setWorkspaceSlots] = useState<Array<string | null>>([]);
+  const [workspacePresets, setWorkspacePresets] = useState<WorkspaceLayoutPreset[]>([]);
+  const [focusedWorkspaceSlot, setFocusedWorkspaceSlot] = useState<number | null>(null);
   const [isProjectSectionOpen, setIsProjectSectionOpen] = useState(true);
   const [isSessionSectionOpen, setIsSessionSectionOpen] = useState(true);
   const [isProjectSettingsOpen, setIsProjectSettingsOpen] = useState(false);
@@ -762,11 +892,18 @@ export function TerminalView() {
       window.sessionStorage.setItem(SELECTED_PROJECT_STORAGE_KEY, selectedProjectId);
       setSelectedSessionId(readStoredSessionId(selectedProjectId));
       setSessionOrder(readStoredSessionOrder(selectedProjectId));
+      setWorkspaceLayout(readStoredWorkspaceLayout(selectedProjectId));
+      setWorkspaceSlots(readStoredWorkspaceSlots(selectedProjectId));
+      setWorkspacePresets(readStoredWorkspacePresets(selectedProjectId));
     } else {
       window.sessionStorage.removeItem(SELECTED_PROJECT_STORAGE_KEY);
       setSelectedSessionId(null);
       setSessionOrder([]);
+      setWorkspaceLayout("single");
+      setWorkspaceSlots([]);
+      setWorkspacePresets([]);
     }
+    setFocusedWorkspaceSlot(null);
   }, [selectedProjectId]);
 
   useEffect(() => {
@@ -789,6 +926,30 @@ export function TerminalView() {
 
     window.localStorage.setItem(sessionOrderStorageKey(selectedProjectId), JSON.stringify(sessionOrder));
   }, [selectedProjectId, sessionOrder]);
+
+  useEffect(() => {
+    if (!selectedProjectId) {
+      return;
+    }
+
+    window.localStorage.setItem(workspaceLayoutStorageKey(selectedProjectId), workspaceLayout);
+  }, [selectedProjectId, workspaceLayout]);
+
+  useEffect(() => {
+    if (!selectedProjectId) {
+      return;
+    }
+
+    window.localStorage.setItem(workspaceSlotsStorageKey(selectedProjectId), JSON.stringify(workspaceSlots));
+  }, [selectedProjectId, workspaceSlots]);
+
+  useEffect(() => {
+    if (!selectedProjectId) {
+      return;
+    }
+
+    window.localStorage.setItem(workspacePresetsStorageKey(selectedProjectId), JSON.stringify(workspacePresets));
+  }, [selectedProjectId, workspacePresets]);
 
   useEffect(() => {
     window.localStorage.setItem(HEADER_VISIBLE_STORAGE_KEY, isHeaderVisible ? "true" : "false");
@@ -826,8 +987,6 @@ export function TerminalView() {
     mutationFn: selectProject,
     onSuccess: (project) => {
       setSelectedProjectId(project.id);
-      setConnectionState("disconnected");
-      setTerminalState("starting");
       toast.success(`Selected project ${project.name}`);
       void queryClient.invalidateQueries({ queryKey: ["projects"] });
       void queryClient.invalidateQueries({ queryKey: ["sessions", project.id] });
@@ -1089,6 +1248,49 @@ export function TerminalView() {
     () => orderedSessions.find((session) => session.id === selectedSessionId) ?? null,
     [orderedSessions, selectedSessionId],
   );
+  const sessionById = useMemo(() => {
+    return new Map(orderedSessions.map((session) => [session.id, session]));
+  }, [orderedSessions]);
+  const workspacePaneCount = paneCountForLayout(workspaceLayout);
+  const resolvedWorkspaceSlots = useMemo(() => {
+    const next: Array<string | null> = Array.from({ length: MAX_WORKSPACE_SLOTS }, () => null);
+    const seen = new Set<string>();
+
+    for (let index = 0; index < MAX_WORKSPACE_SLOTS; index += 1) {
+      const slotSessionId = workspaceSlots[index] ?? null;
+      if (!slotSessionId || !sessionById.has(slotSessionId) || seen.has(slotSessionId)) {
+        continue;
+      }
+
+      next[index] = slotSessionId;
+      seen.add(slotSessionId);
+    }
+
+    if (selectedSessionId && sessionById.has(selectedSessionId) && !seen.has(selectedSessionId)) {
+      next[0] = selectedSessionId;
+      seen.add(selectedSessionId);
+    }
+
+    for (const session of orderedSessions) {
+      if (seen.has(session.id)) {
+        continue;
+      }
+
+      const firstEmpty = next.findIndex((value) => value === null);
+      if (firstEmpty === -1) {
+        break;
+      }
+
+      next[firstEmpty] = session.id;
+      seen.add(session.id);
+    }
+
+    return next;
+  }, [orderedSessions, selectedSessionId, sessionById, workspaceSlots]);
+  const selectedConnectionState = selectedSession
+    ? (connectionBySessionId[selectedSession.id] ?? "disconnected")
+    : "disconnected";
+  const selectedTerminalState = selectedSession ? (terminalStateBySessionId[selectedSession.id] ?? "starting") : "starting";
 
   useEffect(() => {
     if (orderedSessions.length === 0) {
@@ -1117,10 +1319,86 @@ export function TerminalView() {
   }, [orderedSessions, selectedProjectId, selectedSessionId]);
 
   useEffect(() => {
-    if (!selectedSession) {
-      setConnectionState("disconnected");
+    const validSessionIds = new Set(orderedSessions.map((session) => session.id));
+
+    setConnectionBySessionId((previous) => {
+      const entries = Object.entries(previous).filter(([sessionId]) => validSessionIds.has(sessionId));
+      if (entries.length === Object.keys(previous).length) {
+        return previous;
+      }
+      return Object.fromEntries(entries);
+    });
+
+    setTerminalStateBySessionId((previous) => {
+      const entries = Object.entries(previous).filter(([sessionId]) => validSessionIds.has(sessionId));
+      if (entries.length === Object.keys(previous).length) {
+        return previous;
+      }
+      return Object.fromEntries(entries);
+    });
+  }, [orderedSessions]);
+
+  useEffect(() => {
+    if (orderedSessions.length === 0) {
+      setWorkspaceSlots((previous) => (previous.length === 0 ? previous : []));
+      return;
     }
-  }, [selectedSession]);
+
+    const validSessionIds = new Set(orderedSessions.map((session) => session.id));
+    setWorkspaceSlots((previous) => {
+      const next = Array.from({ length: MAX_WORKSPACE_SLOTS }, (_unused, index) => {
+        const sessionId = previous[index] ?? null;
+        if (!sessionId || !validSessionIds.has(sessionId)) {
+          return null;
+        }
+        return sessionId;
+      });
+
+      const seen = new Set<string>();
+      for (let index = 0; index < next.length; index += 1) {
+        const sessionId = next[index];
+        if (!sessionId) {
+          continue;
+        }
+        if (seen.has(sessionId)) {
+          next[index] = null;
+          continue;
+        }
+        seen.add(sessionId);
+      }
+
+      if (!next.some((sessionId) => sessionId !== null) && orderedSessions[0]) {
+        next[0] = orderedSessions[0].id;
+      }
+
+      if (slotsEqual(next, previous)) {
+        return previous;
+      }
+
+      return next;
+    });
+  }, [orderedSessions]);
+
+  useEffect(() => {
+    const maxPaneIndex = workspacePaneCount - 1;
+    setFocusedWorkspaceSlot((current) => (current !== null && current > maxPaneIndex ? null : current));
+  }, [workspacePaneCount]);
+
+  useEffect(() => {
+    if (!selectedSessionId || !sessionById.has(selectedSessionId)) {
+      return;
+    }
+
+    setWorkspaceSlots((previous) => {
+      if (previous.includes(selectedSessionId)) {
+        return previous;
+      }
+
+      const next = Array.from({ length: MAX_WORKSPACE_SLOTS }, (_unused, index) => previous[index] ?? null);
+      next[0] = selectedSessionId;
+      return next;
+    });
+  }, [selectedSessionId, sessionById]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -1307,9 +1585,81 @@ export function TerminalView() {
     });
   };
 
+  const addSessionToWorkspace = useCallback((sessionId: string) => {
+    setWorkspaceSlots((previous) => {
+      if (previous.includes(sessionId)) {
+        return previous;
+      }
+
+      const next = Array.from({ length: MAX_WORKSPACE_SLOTS }, (_unused, index) => previous[index] ?? null);
+      const firstEmpty = next.findIndex((value) => value === null);
+      if (firstEmpty >= 0) {
+        next[firstEmpty] = sessionId;
+      } else {
+        next[0] = sessionId;
+      }
+      return next;
+    });
+  }, []);
+
+  const setWorkspaceSlotSession = useCallback((slotIndex: number, sessionId: string | null) => {
+    setWorkspaceSlots((previous) => {
+      const next = Array.from({ length: MAX_WORKSPACE_SLOTS }, (_unused, index) => previous[index] ?? null);
+      next[slotIndex] = sessionId;
+
+      for (let index = 0; index < next.length; index += 1) {
+        if (index === slotIndex) {
+          continue;
+        }
+        if (next[index] === sessionId) {
+          next[index] = null;
+        }
+      }
+
+      if (slotsEqual(next, previous)) {
+        return previous;
+      }
+
+      return next;
+    });
+  }, []);
+
+  const saveWorkspacePreset = useCallback(() => {
+    const provided = window.prompt("Save workspace layout as:");
+    if (provided === null) {
+      return;
+    }
+
+    const name = provided.trim();
+    if (!name) {
+      toast.warning("Preset name cannot be empty");
+      return;
+    }
+
+    const preset: WorkspaceLayoutPreset = {
+      name,
+      layout: workspaceLayout,
+      slots: resolvedWorkspaceSlots,
+    };
+
+    setWorkspacePresets((previous) => {
+      const withoutExisting = previous.filter((entry) => entry.name.toLowerCase() !== name.toLowerCase());
+      return [...withoutExisting, preset].sort((a, b) => a.name.localeCompare(b.name));
+    });
+    toast.success(`Saved workspace preset '${name}'`);
+  }, [resolvedWorkspaceSlots, workspaceLayout]);
+
+  const loadWorkspacePreset = useCallback((preset: WorkspaceLayoutPreset) => {
+    setWorkspaceLayout(preset.layout);
+    setWorkspaceSlots(preset.slots);
+    setFocusedWorkspaceSlot(null);
+    toast.success(`Loaded workspace preset '${preset.name}'`);
+  }, []);
+
   const handleSessionUnavailable = useCallback(
     (sessionId: string, reason: SessionUnavailableReason) => {
       setSelectedSessionId((current) => (current === sessionId ? null : current));
+      setWorkspaceSlots((previous) => previous.map((slotSessionId) => (slotSessionId === sessionId ? null : slotSessionId)));
       toast.warning(reason === "deleted" ? `Session ${sessionId} was deleted` : `Session ${sessionId} was not found`);
       if (selectedProjectId) {
         void queryClient.invalidateQueries({ queryKey: ["sessions", selectedProjectId] });
@@ -1323,7 +1673,7 @@ export function TerminalView() {
       return;
     }
 
-    terminalRef.current?.reconnect();
+    terminalRefs.current[selectedSession.id]?.reconnect();
     toast.info("Reconnecting socket...");
   }, [selectedSession]);
 
@@ -1464,7 +1814,25 @@ export function TerminalView() {
     }
   };
 
-  const connectionBadgeText = selectedSession ? connectionState : "no-session";
+  const workspaceItems = useMemo(() => {
+    return resolvedWorkspaceSlots.slice(0, workspacePaneCount).map((sessionId, slotIndex) => ({
+      slotIndex,
+      session: sessionId ? (sessionById.get(sessionId) ?? null) : null,
+    }));
+  }, [resolvedWorkspaceSlots, sessionById, workspacePaneCount]);
+
+  const focusedWorkspaceItem =
+    focusedWorkspaceSlot !== null && focusedWorkspaceSlot < workspaceItems.length ? workspaceItems[focusedWorkspaceSlot] : null;
+  const displayedWorkspaceItems =
+    focusedWorkspaceItem && focusedWorkspaceItem.session ? [focusedWorkspaceItem] : workspaceItems;
+  const workspaceGridClass =
+    displayedWorkspaceItems.length <= 1
+      ? "grid h-full min-h-0 grid-cols-1 gap-2"
+      : displayedWorkspaceItems.length === 2
+        ? "grid h-full min-h-0 grid-cols-1 gap-2 lg:grid-cols-2"
+        : "grid h-full min-h-0 grid-cols-1 gap-2 lg:grid-cols-2";
+
+  const connectionBadgeText = selectedSession ? selectedConnectionState : "no-session";
   const mainLayoutClass = isWideMode
     ? "mx-auto flex h-[100dvh] min-h-screen w-full max-w-none flex-col gap-3 px-2 py-3 md:gap-4 md:px-2 md:py-4"
     : "mx-auto flex h-[100dvh] min-h-screen w-full max-w-[1500px] flex-col gap-3 px-3 py-3 md:gap-4 md:px-6 md:py-4";
@@ -1478,11 +1846,11 @@ export function TerminalView() {
               <h1 className="font-heading text-xl tracking-tight">Command Center</h1>
 
               <div className="flex flex-wrap items-center gap-2">
-                <Badge variant={badgeVariantForConnection(connectionState)} className="font-mono uppercase tracking-wide">
+                <Badge variant={badgeVariantForConnection(selectedConnectionState)} className="font-mono uppercase tracking-wide">
                   {connectionBadgeText}
                 </Badge>
                 <Badge variant="secondary" className="font-mono uppercase tracking-wide">
-                  {terminalState}
+                  {selectedTerminalState}
                 </Badge>
                 <Badge variant={healthQuery.data?.ok ? "success" : "outline"} className="font-mono uppercase tracking-wide">
                   API {healthQuery.data?.ok ? "healthy" : "pending"}
@@ -1727,6 +2095,11 @@ export function TerminalView() {
                                     className="min-w-0 flex-1 text-left"
                                     onClick={() => {
                                       setSelectedSessionId(session.id);
+                                      addSessionToWorkspace(session.id);
+                                      const slotIndex = resolvedWorkspaceSlots.findIndex((sessionId) => sessionId === session.id);
+                                      if (slotIndex >= 0) {
+                                        setFocusedWorkspaceSlot(slotIndex);
+                                      }
                                     }}
                                   >
                                     <p className="truncate font-mono text-sm font-semibold">{session.id}</p>
@@ -1753,6 +2126,22 @@ export function TerminalView() {
                                   </button>
 
                                   <div className="flex items-center">
+                                    <Tooltip>
+                                      <TooltipTrigger asChild>
+                                        <Button
+                                          size="icon"
+                                          variant="ghost"
+                                          className="h-7 w-7"
+                                          onClick={() => {
+                                            addSessionToWorkspace(session.id);
+                                          }}
+                                        >
+                                          <Plus className="h-4 w-4" />
+                                        </Button>
+                                      </TooltipTrigger>
+                                      <TooltipContent>Add to workspace</TooltipContent>
+                                    </Tooltip>
+
                                     <Tooltip>
                                       <TooltipTrigger asChild>
                                         <Button
@@ -1880,6 +2269,100 @@ export function TerminalView() {
                   </>
                 ) : null}
 
+                <section className="rounded-md border border-border bg-card/60 p-2">
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-mono text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                        Workspace
+                      </span>
+                      {focusedWorkspaceItem?.session ? (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="h-7 px-2 font-mono text-[10px]"
+                          onClick={() => {
+                            setFocusedWorkspaceSlot(null);
+                          }}
+                        >
+                          Exit focus
+                        </Button>
+                      ) : null}
+                    </div>
+
+                    <div className="grid grid-cols-3 gap-1">
+                      <Button
+                        size="sm"
+                        variant={workspaceLayout === "single" ? "secondary" : "outline"}
+                        className="h-7 px-2 font-mono text-[10px]"
+                        onClick={() => {
+                          setWorkspaceLayout("single");
+                        }}
+                      >
+                        1-up
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant={workspaceLayout === "split" ? "secondary" : "outline"}
+                        className="h-7 px-2 font-mono text-[10px]"
+                        onClick={() => {
+                          setWorkspaceLayout("split");
+                        }}
+                      >
+                        2-up
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant={workspaceLayout === "quad" ? "secondary" : "outline"}
+                        className="h-7 px-2 font-mono text-[10px]"
+                        onClick={() => {
+                          setWorkspaceLayout("quad");
+                        }}
+                      >
+                        4-up
+                      </Button>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="h-7 px-2 font-mono text-[10px]"
+                        onClick={saveWorkspacePreset}
+                        disabled={!selectedProjectId || orderedSessions.length === 0}
+                      >
+                        Save preset
+                      </Button>
+
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="h-7 px-2 font-mono text-[10px]"
+                            disabled={workspacePresets.length === 0}
+                          >
+                            Load preset
+                          </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="start" className="w-48">
+                          <DropdownMenuLabel>Workspace Presets</DropdownMenuLabel>
+                          <DropdownMenuSeparator />
+                          {workspacePresets.map((preset) => (
+                            <DropdownMenuItem
+                              key={preset.name}
+                              onSelect={() => {
+                                loadWorkspacePreset(preset);
+                              }}
+                            >
+                              {preset.name}
+                            </DropdownMenuItem>
+                          ))}
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                    </div>
+                  </div>
+                </section>
+
                 <div className="flex flex-wrap gap-2">
                   <Button
                     size="sm"
@@ -1905,33 +2388,148 @@ export function TerminalView() {
           <ResizablePanel defaultSize={isStackedLayout ? 64 : 72} minSize={isStackedLayout ? 40 : 35}>
             <Card className="h-full rounded-none border-0 bg-transparent shadow-none">
               <CardContent className="h-full rounded-none bg-[#1f1811] p-3">
-                {selectedSession && selectedProjectId ? (
-                  <TerminalPane
-                    key={`${selectedProjectId}:${selectedSession.id}`}
-                    ref={terminalRef}
-                    projectId={selectedProjectId}
-                    sessionId={selectedSession.id}
-                    onConnectionStateChange={setConnectionState}
-                    onTerminalStateChange={setTerminalState}
-                    onSessionUnavailable={handleSessionUnavailable}
-                  />
+                {selectedProjectId ? (
+                  orderedSessions.length > 0 ? (
+                    <div className={workspaceGridClass}>
+                      {displayedWorkspaceItems.map(({ slotIndex, session }) => {
+                        const slotSessionId = resolvedWorkspaceSlots[slotIndex] ?? "";
+
+                        return (
+                          <div
+                            key={`workspace-slot-${slotIndex}`}
+                            className="flex min-h-0 flex-col overflow-hidden rounded-md border border-border/40 bg-[#1a130f]"
+                          >
+                            <div className="flex items-center justify-between gap-2 border-b border-border/40 bg-card/40 p-2">
+                              <div className="min-w-0">
+                                <p className="truncate font-mono text-[11px] font-semibold uppercase tracking-wide text-foreground/80">
+                                  Slot {slotIndex + 1}
+                                </p>
+                                <p className="truncate font-mono text-xs font-semibold text-foreground">
+                                  {session ? session.id : "No session selected"}
+                                </p>
+                              </div>
+
+                              <div className="flex items-center gap-1">
+                                <Tooltip>
+                                  <TooltipTrigger asChild>
+                                    <select
+                                      value={slotSessionId}
+                                      onChange={(event) => {
+                                        const nextSessionId = event.target.value.trim() || null;
+                                        setWorkspaceSlotSession(slotIndex, nextSessionId);
+                                        if (nextSessionId) {
+                                          setSelectedSessionId(nextSessionId);
+                                        }
+                                      }}
+                                      className="h-7 min-w-[8rem] rounded-sm border border-border/70 bg-card px-2 font-mono text-[10px] text-foreground outline-none focus:border-primary/60"
+                                    >
+                                      <option value="">(empty)</option>
+                                      {orderedSessions.map((workspaceSession) => (
+                                        <option key={workspaceSession.id} value={workspaceSession.id}>
+                                          {workspaceSession.id}
+                                        </option>
+                                      ))}
+                                    </select>
+                                  </TooltipTrigger>
+                                  <TooltipContent>Assign session to this slot</TooltipContent>
+                                </Tooltip>
+
+                                {session ? (
+                                  <>
+                                    <Tooltip>
+                                      <TooltipTrigger asChild>
+                                        <Button
+                                          size="icon"
+                                          variant="ghost"
+                                          className={`h-7 w-7 border border-border/70 ${
+                                            focusedWorkspaceSlot === slotIndex
+                                              ? "bg-primary/20 text-primary hover:bg-primary/25"
+                                              : "bg-card/70 text-foreground hover:bg-card"
+                                          }`}
+                                          onClick={() => {
+                                            setFocusedWorkspaceSlot((current) => (current === slotIndex ? null : slotIndex));
+                                            setSelectedSessionId(session.id);
+                                          }}
+                                        >
+                                          <Maximize2 className="h-4 w-4" />
+                                        </Button>
+                                      </TooltipTrigger>
+                                      <TooltipContent>
+                                        {focusedWorkspaceSlot === slotIndex ? "Exit focus mode" : "Focus this slot"}
+                                      </TooltipContent>
+                                    </Tooltip>
+                                  </>
+                                ) : null}
+                              </div>
+                            </div>
+
+                            <div className="min-h-0 flex-1">
+                              {session ? (
+                                <TerminalPane
+                                  key={`${selectedProjectId}:${session.id}`}
+                                  ref={(instance) => {
+                                    terminalRefs.current[session.id] = instance;
+                                  }}
+                                  projectId={selectedProjectId}
+                                  sessionId={session.id}
+                                  onConnectionStateChange={(state) => {
+                                    setConnectionBySessionId((previous) => {
+                                      if (previous[session.id] === state) {
+                                        return previous;
+                                      }
+                                      return { ...previous, [session.id]: state };
+                                    });
+                                  }}
+                                  onTerminalStateChange={(state) => {
+                                    setTerminalStateBySessionId((previous) => {
+                                      if (previous[session.id] === state) {
+                                        return previous;
+                                      }
+                                      return { ...previous, [session.id]: state };
+                                    });
+                                  }}
+                                  onSessionUnavailable={handleSessionUnavailable}
+                                />
+                              ) : (
+                                <div className="flex h-full min-h-0 items-center justify-center text-center text-sm text-muted-foreground">
+                                  <p>Pick a session for this slot.</p>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <div className="flex h-full items-center justify-center rounded-none border border-border/30 bg-[#1f1811] text-center text-sm text-muted-foreground">
+                      <div className="space-y-2">
+                        <p>No sessions in this project yet.</p>
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          onClick={() => {
+                            runAction("session.new.auto", { source: "fallback" });
+                          }}
+                        >
+                          <Plus className="h-4 w-4" />
+                          Create session
+                        </Button>
+                      </div>
+                    </div>
+                  )
                 ) : (
                   <div className="flex h-full items-center justify-center rounded-none border border-border/30 bg-[#1f1811] text-center text-sm text-muted-foreground">
                     <div className="space-y-2">
-                      <p>{selectedProjectId ? "No session selected." : "No project selected."}</p>
+                      <p>No project selected.</p>
                       <Button
                         size="sm"
                         variant="secondary"
                         onClick={() => {
-                          if (selectedProjectId) {
-                            runAction("session.new.auto", { source: "fallback" });
-                          } else {
-                            runAction("project.new.pick", { source: "fallback" });
-                          }
+                          runAction("project.new.pick", { source: "fallback" });
                         }}
                       >
-                        {selectedProjectId ? <Plus className="h-4 w-4" /> : <FolderOpen className="h-4 w-4" />}
-                        {selectedProjectId ? "Create session" : "Pick project"}
+                        <FolderOpen className="h-4 w-4" />
+                        Pick project
                       </Button>
                     </div>
                   </div>

@@ -15,6 +15,8 @@ Web terminal app powered by Bun PTY + zsh on the backend and TanStack React + xt
 - Hook toasts include a "View output" action when stdout/stderr is present.
 - Worktree sessions are persisted and cleaned up (worktree + branch) when deleted.
 - Sessions have a persisted lifecycle state (`planning`, `exploration`, `implementing`, `in_review`, `submitted_pr`, `merged`, `blocked`, `paused`) that can be changed from the command palette or session list.
+- The terminal area supports parallel workspace layouts (`1-up`, `2-up`, `4-up`) with per-slot session selection and optional focus mode.
+- Workspace layouts and presets are saved per project in local storage.
 
 ## Docs
 

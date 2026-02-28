@@ -163,6 +163,9 @@ Responsibilities:
 - Manages selected project + selected session
 - Manages per-project manual session ordering
 - Renders left control pane and right terminal pane
+- Supports multi-session workspace layouts (`single`, `split`, `quad`) in the terminal pane
+- Supports per-slot session assignment with optional focus mode for one slot
+- Supports saving/loading named workspace presets per project
 - Exposes project actions (pick, enter path, settings, delete)
 - Uses a shared frontend action registry so commands can be invoked from both UI controls and command palette
 - Exposes a global command palette (`Cmd/Ctrl+K`) with session commands first, then project commands:
@@ -216,6 +219,9 @@ Stored in web storage:
 - Session order per project in `localStorage`
 - Header visibility in `localStorage` (`command-center.header-visible`)
 - Wide mode in `localStorage` (`command-center.wide-mode`)
+- Workspace layout per project in `localStorage` (`command-center.workspace-layout.<projectId>`)
+- Workspace slot assignments per project in `localStorage` (`command-center.workspace-slots.<projectId>`)
+- Workspace presets per project in `localStorage` (`command-center.workspace-presets.<projectId>`)
 
 This keeps ordering and selection stable while allowing independent state per project.
 

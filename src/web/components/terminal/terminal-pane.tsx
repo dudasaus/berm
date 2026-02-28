@@ -411,7 +411,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
     return (
       <div
         ref={mountRef}
-        className="h-full min-h-[420px] w-full overflow-hidden bg-[#1f1811]"
+        className="h-full min-h-0 w-full overflow-hidden bg-[#1f1811]"
         style={{ backgroundColor: TERMINAL_BG }}
       />
     );
