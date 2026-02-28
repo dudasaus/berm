@@ -535,7 +535,7 @@ describe("server config routes and websocket", () => {
 
   test("returns session-manager errors from route handlers", async () => {
     const suffix = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
-    const registryPath = `/tmp/command-center-index-routes-${suffix}.json`;
+    const registryPath = `/tmp/berm-index-routes-${suffix}.json`;
     const manager = new TerminalSessionManager({
       tmuxSocketName: `cc-index-routes-${suffix}`,
       registryPath,

@@ -13,7 +13,7 @@ import {
 
 function uniqueRegistryPath(prefix: string): string {
   const suffix = `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
-  return `/tmp/command-center-registry-unit/${suffix}/sessions.json`;
+  return `/tmp/berm-registry-unit/${suffix}/sessions.json`;
 }
 
 function makeProject(id: string, path: string): ProjectRegistryEntry {

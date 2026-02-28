@@ -2,7 +2,7 @@
 
 set -e
 
-echo "Compiling command-center..."
+echo "Compiling berm..."
 bun scripts/compile.ts
 
 read -p "Move to ~/.local/bin? [y/N] " -n 1 -r
@@ -10,8 +10,8 @@ echo
 
 if [[ $REPLY =~ ^[Yy]$ ]]; then
     mkdir -p ~/.local/bin
-    mv command-center ~/.local/bin/
-    echo "Installed to ~/.local/bin/command-center"
+    mv berm ~/.local/bin/
+    echo "Installed to ~/.local/bin/berm"
 
     if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
         echo ""

@@ -15,12 +15,12 @@ describe("HTTP response builders", () => {
   });
 
   test("session response returns 404 for unknown session", async () => {
-    const projectPath = `/tmp/command-center-http-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+    const projectPath = `/tmp/berm-http-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
     mkdirSync(projectPath, { recursive: true });
 
     const manager = new TerminalSessionManager({
       tmuxSocketName: `cc-http-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
-      registryPath: `/tmp/command-center-http-registry-${Date.now()}-${Math.random().toString(16).slice(2, 8)}.json`,
+      registryPath: `/tmp/berm-http-registry-${Date.now()}-${Math.random().toString(16).slice(2, 8)}.json`,
     });
 
     const project = manager.selectProject(projectPath);

@@ -74,10 +74,10 @@ import {
 import type { TerminalStatusState } from "../../../shared/protocol";
 
 const STACK_LAYOUT_BREAKPOINT_PX = 1100;
-const SELECTED_PROJECT_STORAGE_KEY = "command-center.selected-project-id";
-const HEADER_VISIBLE_STORAGE_KEY = "command-center.header-visible";
-const WIDE_MODE_STORAGE_KEY = "command-center.wide-mode";
-const WORKSPACE_BOARD_STORAGE_KEY = "command-center.workspace-board";
+const SELECTED_PROJECT_STORAGE_KEY = "berm.selected-project-id";
+const HEADER_VISIBLE_STORAGE_KEY = "berm.header-visible";
+const WIDE_MODE_STORAGE_KEY = "berm.wide-mode";
+const WORKSPACE_BOARD_STORAGE_KEY = "berm.workspace-board";
 const MAX_WORKSPACE_SLOTS = 4;
 const PALETTE_GROUP_ORDER: TerminalActionGroup[] = ["Session", "Project", "View"];
 
@@ -96,23 +96,23 @@ type WorkspaceBoardEntry = {
 };
 
 function selectedSessionStorageKey(projectId: string) {
-  return `command-center.selected-session-id.${projectId}`;
+  return `berm.selected-session-id.${projectId}`;
 }
 
 function sessionOrderStorageKey(projectId: string) {
-  return `command-center.session-order.${projectId}`;
+  return `berm.session-order.${projectId}`;
 }
 
 function workspaceLayoutStorageKey(projectId: string) {
-  return `command-center.workspace-layout.${projectId}`;
+  return `berm.workspace-layout.${projectId}`;
 }
 
 function workspaceSlotsStorageKey(projectId: string) {
-  return `command-center.workspace-slots.${projectId}`;
+  return `berm.workspace-slots.${projectId}`;
 }
 
 function workspacePresetsStorageKey(projectId: string) {
-  return `command-center.workspace-presets.${projectId}`;
+  return `berm.workspace-presets.${projectId}`;
 }
 
 type ProjectMetadata = {
@@ -3138,8 +3138,8 @@ export function TerminalView() {
                   className="w-full rounded-md border border-border bg-background px-2 py-1.5 font-mono text-xs outline-none focus:border-primary/60"
                 />
                 <p className="font-mono text-[11px] text-muted-foreground">
-                  Environment: COMMAND_CENTER_PROJECT_ID, COMMAND_CENTER_PROJECT_NAME, COMMAND_CENTER_PROJECT_PATH,
-                  COMMAND_CENTER_WORKTREE_BRANCH, COMMAND_CENTER_WORKTREE_PATH.
+                  Environment: BERM_PROJECT_ID, BERM_PROJECT_NAME, BERM_PROJECT_PATH, BERM_WORKTREE_BRANCH,
+                  BERM_WORKTREE_PATH.
                 </p>
               </div>
 

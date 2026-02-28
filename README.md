@@ -41,8 +41,8 @@ bun run dev
 bun run compile
 ```
 
-- Produces a standalone binary at `./command-center`.
-- `compile.sh` can optionally move it to `~/.local/bin/command-center`.
+- Produces a standalone binary at `./berm`.
+- `compile.sh` can optionally move it to `~/.local/bin/berm`.
 - Compilation is implemented in `scripts/compile.ts` using `Bun.build()` with the `bun-plugin-tailwind` plugin so frontend CSS is bundled correctly.
 
 ## Test

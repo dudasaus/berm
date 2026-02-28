@@ -1,10 +1,10 @@
 {
-  "name": "command-center",
+  "name": "berm",
   "module": "index.ts",
   "type": "module",
   "private": true,
   "scripts": {
-    "dev": "COMMAND_CENTER_PORT=3000 bun --hot src/server/index.ts",
+    "dev": "BERM_PORT=3000 bun --hot src/server/index.ts",
     "compile": "./compile.sh",
     "start": "bun src/server/index.ts",
     "test": "bun test",

@@ -4,7 +4,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
-const outputPath = resolve(scriptDir, "../command-center");
+const outputPath = resolve(scriptDir, "../berm");
 const entrypoint = resolve(scriptDir, "../src/server/index.ts");
 
 const result = await Bun.build({

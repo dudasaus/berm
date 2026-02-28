@@ -66,7 +66,8 @@ File: `src/server/session-registry.ts`
 
 Stored in default path:
 
-- `~/.command-center/sessions.json`
+- `~/.berm/sessions.json`
+- Legacy compatibility: if `~/.berm/sessions.json` does not exist but `~/.command-center/sessions.json` does, Berm loads the legacy path.
 
 Current schema (version 5):
 
@@ -226,18 +227,18 @@ Stored in web storage:
 - Selected project ID in `sessionStorage`
 - Selected session ID per project in `sessionStorage`
 - Session order per project in `localStorage`
-- Header visibility in `localStorage` (`command-center.header-visible`)
-- Wide mode in `localStorage` (`command-center.wide-mode`)
-- Workspace layout per project in `localStorage` (`command-center.workspace-layout.<projectId>`)
-- Workspace slot assignments per project in `localStorage` (`command-center.workspace-slots.<projectId>`)
-- Workspace presets per project in `localStorage` (`command-center.workspace-presets.<projectId>`)
-- Cross-project pinned workspace board in `localStorage` (`command-center.workspace-board`)
+- Header visibility in `localStorage` (`berm.header-visible`)
+- Wide mode in `localStorage` (`berm.wide-mode`)
+- Workspace layout per project in `localStorage` (`berm.workspace-layout.<projectId>`)
+- Workspace slot assignments per project in `localStorage` (`berm.workspace-slots.<projectId>`)
+- Workspace presets per project in `localStorage` (`berm.workspace-presets.<projectId>`)
+- Cross-project pinned workspace board in `localStorage` (`berm.workspace-board`)
 
 This keeps ordering and selection stable while allowing independent state per project.
 
 ## tmux Integration
 
-- tmux socket namespace defaults to `command-center`
+- tmux socket namespace defaults to `berm`
 - All tmux commands run as `tmux -L <socket> ...`
 - Session creation uses workspace path as tmux cwd (`-c <workspacePath>`)
 
@@ -253,11 +254,12 @@ Optional post-create hook:
 
 - Runs as `zsh -lc "<worktreeHookCommand>"` with cwd set to the new worktree path
 - Receives environment variables:
-  - `COMMAND_CENTER_PROJECT_ID`
-  - `COMMAND_CENTER_PROJECT_NAME`
-  - `COMMAND_CENTER_PROJECT_PATH`
-  - `COMMAND_CENTER_WORKTREE_BRANCH`
-  - `COMMAND_CENTER_WORKTREE_PATH`
+  - `BERM_PROJECT_ID`
+  - `BERM_PROJECT_NAME`
+  - `BERM_PROJECT_PATH`
+  - `BERM_WORKTREE_BRANCH`
+  - `BERM_WORKTREE_PATH`
+  - Legacy aliases also provided: `COMMAND_CENTER_PROJECT_ID`, `COMMAND_CENTER_PROJECT_NAME`, `COMMAND_CENTER_PROJECT_PATH`, `COMMAND_CENTER_WORKTREE_BRANCH`, `COMMAND_CENTER_WORKTREE_PATH`
 - Non-zero exit code or timeout returns `WORKTREE_HOOK_FAILED` with hook output and a `decisionToken`
 - Client must call the decision endpoint to abort/cleanup or continue creating the session
 
@@ -301,11 +303,11 @@ Important detail:
 
 Output behavior:
 
-- Build emits a standalone binary and normalizes it to `./command-center` at repository root.
-- `compile.sh` can optionally move this binary to `~/.local/bin/command-center`.
+- Build emits a standalone binary and normalizes it to `./berm` at repository root.
+- `compile.sh` can optionally move this binary to `~/.local/bin/berm`.
 
 ## Environment Variables
 
-- `COMMAND_CENTER_PORT` (default `3000`)
-- `COMMAND_CENTER_TMUX_SOCKET` (optional tmux socket name override)
-- `COMMAND_CENTER_REGISTRY_PATH` (optional registry file override)
+- `BERM_PORT` (default `3000`; legacy alias: `COMMAND_CENTER_PORT`)
+- `BERM_TMUX_SOCKET` (optional tmux socket name override; legacy alias: `COMMAND_CENTER_TMUX_SOCKET`)
+- `BERM_REGISTRY_PATH` (optional registry file override; legacy alias: `COMMAND_CENTER_REGISTRY_PATH`)

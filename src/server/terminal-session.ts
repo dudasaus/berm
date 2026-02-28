@@ -154,7 +154,7 @@ interface PendingWorktreeHookDecision {
 
 const DEFAULT_COLS = 120;
 const DEFAULT_ROWS = 34;
-const DEFAULT_TMUX_SOCKET_NAME = "command-center";
+const DEFAULT_TMUX_SOCKET_NAME = "berm";
 const DEFAULT_WORKTREE_HOOK_TIMEOUT_MS = 15_000;
 const MIN_WORKTREE_HOOK_TIMEOUT_MS = 1_000;
 const MAX_WORKTREE_HOOK_TIMEOUT_MS = 120_000;
@@ -1263,6 +1263,11 @@ export class TerminalSessionManager {
       cwd: workspacePath,
       env: {
         ...this.options.env,
+        BERM_PROJECT_ID: project.id,
+        BERM_PROJECT_NAME: project.name,
+        BERM_PROJECT_PATH: project.path,
+        BERM_WORKTREE_BRANCH: branchName,
+        BERM_WORKTREE_PATH: workspacePath,
         COMMAND_CENTER_PROJECT_ID: project.id,
         COMMAND_CENTER_PROJECT_NAME: project.name,
         COMMAND_CENTER_PROJECT_PATH: project.path,

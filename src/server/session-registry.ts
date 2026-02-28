@@ -106,7 +106,13 @@ const REGISTRY_VERSION = 5;
 const DEFAULT_WORKTREE_HOOK_TIMEOUT_MS = 15_000;
 
 export function defaultSessionRegistryPath(): string {
-  return join(homedir(), ".command-center", "sessions.json");
+  const home = homedir();
+  const preferredPath = join(home, ".berm", "sessions.json");
+  const legacyPath = join(home, ".command-center", "sessions.json");
+  if (existsSync(preferredPath) || !existsSync(legacyPath)) {
+    return preferredPath;
+  }
+  return legacyPath;
 }
 
 export function sessionRegistryKey(projectId: string, sessionId: string): string {

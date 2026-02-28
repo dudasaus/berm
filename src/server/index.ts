@@ -97,9 +97,13 @@ export interface ServerConfig {
 
 function createDefaultManager(): TerminalSessionManager {
   return new TerminalSessionManager({
-    tmuxSocketName: Bun.env.COMMAND_CENTER_TMUX_SOCKET ?? undefined,
-    registryPath: Bun.env.COMMAND_CENTER_REGISTRY_PATH ?? undefined,
+    tmuxSocketName: envWithLegacy("BERM_TMUX_SOCKET", "COMMAND_CENTER_TMUX_SOCKET"),
+    registryPath: envWithLegacy("BERM_REGISTRY_PATH", "COMMAND_CENTER_REGISTRY_PATH"),
   });
+}
+
+function envWithLegacy(currentName: string, legacyName: string): string | undefined {
+  return Bun.env[currentName] ?? Bun.env[legacyName] ?? undefined;
 }
 
 export function buildHealthResponse(): Response {
@@ -603,7 +607,7 @@ export function createServerConfig(
 
 export function createServer(options: number | CreateServerOptions = {}) {
   const normalized: CreateServerOptions = typeof options === "number" ? { port: options } : options;
-  const port = normalized.port ?? Number(Bun.env.COMMAND_CENTER_PORT ?? 3000);
+  const port = normalized.port ?? Number(envWithLegacy("BERM_PORT", "COMMAND_CENTER_PORT") ?? 3000);
   const manager = normalized.manager ?? createDefaultManager();
   const openProjectPicker = normalized.pickProjectDirectory ?? pickProjectDirectory;
   const config = createServerConfig(manager, openProjectPicker);

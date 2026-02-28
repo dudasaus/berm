@@ -22,7 +22,7 @@ function uniqueSessionName(prefix: string): string {
 }
 
 function createProjectPath(prefix: string): string {
-  const path = `/tmp/command-center-project-${prefix}-${uniqueSuffix()}`;
+  const path = `/tmp/berm-project-${prefix}-${uniqueSuffix()}`;
   mkdirSync(path, { recursive: true });
   return path;
 }
@@ -60,7 +60,7 @@ function createGitProjectPath(prefix: string): string {
     throw new Error(`git config user.name failed: ${nameResult.stderr || "unknown error"}`);
   }
 
-  const emailResult = runGit(path, ["config", "user.email", "command-center@example.com"]);
+  const emailResult = runGit(path, ["config", "user.email", "berm@example.com"]);
   if (emailResult.exitCode !== 0) {
     throw new Error(`git config user.email failed: ${emailResult.stderr || "unknown error"}`);
   }
@@ -76,7 +76,7 @@ function createGitProjectPath(prefix: string): string {
 function createContext(prefix: string): TestContext {
   const suffix = uniqueSuffix();
   const socketName = `cc-test-${prefix}-${suffix}`;
-  const registryPath = `/tmp/command-center-registry-${prefix}-${suffix}.json`;
+  const registryPath = `/tmp/berm-registry-${prefix}-${suffix}.json`;
 
   const manager = new TerminalSessionManager({
     tmuxSocketName: socketName,
@@ -312,7 +312,7 @@ describe("TerminalSessionManager (tmux, projects)", () => {
     expect(context.manager.hasSession(projectB.id, "shared")).toBe(true);
   });
 
-  test("ignores tmux sessions not in command-center registry", () => {
+  test("ignores tmux sessions not in berm registry", () => {
     const context = createContext("scope");
     if (!context.manager.isTmuxAvailable()) {
       return;
@@ -337,7 +337,7 @@ describe("TerminalSessionManager (tmux, projects)", () => {
   test("persists tracked sessions and projects across manager instances", () => {
     const suffix = uniqueSuffix();
     const socketName = `cc-test-persist-${suffix}`;
-    const registryPath = `/tmp/command-center-registry-persist-${suffix}.json`;
+    const registryPath = `/tmp/berm-registry-persist-${suffix}.json`;
 
     const projectPath = createProjectPath("persist");
 
