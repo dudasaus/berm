@@ -4,6 +4,8 @@ import {
   Command as CommandIcon,
   ChevronDown,
   ChevronUp,
+  Eye,
+  EyeOff,
   FolderOpen,
   Plus,
   RefreshCw,
@@ -56,7 +58,8 @@ import type { TerminalStatusState } from "../../../shared/protocol";
 
 const STACK_LAYOUT_BREAKPOINT_PX = 1100;
 const SELECTED_PROJECT_STORAGE_KEY = "command-center.selected-project-id";
-const PALETTE_GROUP_ORDER: TerminalActionGroup[] = ["Session", "Project"];
+const HEADER_VISIBLE_STORAGE_KEY = "command-center.header-visible";
+const PALETTE_GROUP_ORDER: TerminalActionGroup[] = ["Session", "Project", "View"];
 
 function selectedSessionStorageKey(projectId: string) {
   return `command-center.selected-session-id.${projectId}`;
@@ -415,6 +418,18 @@ function readStoredSessionOrder(projectId: string): string[] {
   }
 }
 
+function readStoredHeaderVisible(): boolean {
+  if (typeof window === "undefined") {
+    return true;
+  }
+
+  const stored = window.localStorage.getItem(HEADER_VISIBLE_STORAGE_KEY);
+  if (stored === "false") {
+    return false;
+  }
+  return true;
+}
+
 function promptForOptionalSessionName(): string | undefined | null {
   const provided = window.prompt(
     "Enter a session name (letters, numbers, underscores, hyphens). Leave blank for auto-generated.",
@@ -493,6 +508,10 @@ function renderActionIcon(icon: TerminalActionIcon) {
       return <Trash2 className="h-4 w-4" />;
     case "refresh":
       return <RefreshCw className="h-4 w-4" />;
+    case "eye-open":
+      return <Eye className="h-4 w-4" />;
+    case "eye-closed":
+      return <EyeOff className="h-4 w-4" />;
     default: {
       const neverIcon: never = icon;
       throw new Error(`Unknown icon '${neverIcon as string}'`);
@@ -519,6 +538,7 @@ export function TerminalView() {
   const [projectSettingsHookTimeoutMs, setProjectSettingsHookTimeoutMs] = useState("15000");
   const [worktreeHookFailure, setWorktreeHookFailure] = useState<WorktreeHookFailurePayload | null>(null);
   const [hookOutputDialog, setHookOutputDialog] = useState<HookOutputDialogState | null>(null);
+  const [isHeaderVisible, setIsHeaderVisible] = useState(() => readStoredHeaderVisible());
   const [isStackedLayout, setIsStackedLayout] = useState(() => {
     if (typeof window === "undefined") {
       return false;
@@ -636,6 +656,10 @@ export function TerminalView() {
 
     window.localStorage.setItem(sessionOrderStorageKey(selectedProjectId), JSON.stringify(sessionOrder));
   }, [selectedProjectId, sessionOrder]);
+
+  useEffect(() => {
+    window.localStorage.setItem(HEADER_VISIBLE_STORAGE_KEY, isHeaderVisible ? "true" : "false");
+  }, [isHeaderVisible]);
 
   const healthQuery = useQuery({
     queryKey: ["health"],
@@ -1153,6 +1177,7 @@ export function TerminalView() {
       selectedProjectName: selectedProject?.name ?? null,
       selectedSessionId,
       selectedSessionName: selectedSession?.id ?? null,
+      isHeaderVisible,
       pending: {
         pickProject: selectProjectMutation.isPending,
         createSession: createSessionMutation.isPending,
@@ -1164,6 +1189,7 @@ export function TerminalView() {
       createSessionMutation.isPending,
       deleteProjectMutation.isPending,
       deleteSessionMutation.isPending,
+      isHeaderVisible,
       selectedProject,
       selectedProjectId,
       selectedSession,
@@ -1192,6 +1218,12 @@ export function TerminalView() {
     deleteProject: deleteProjectById,
     deleteSession: deleteSessionById,
     reconnectSession: reconnectSelectedSession,
+    hideHeader: () => {
+      setIsHeaderVisible(false);
+    },
+    showHeader: () => {
+      setIsHeaderVisible(true);
+    },
   };
 
   const getActionAvailability = (actionId: TerminalActionId, invocation: TerminalActionInvocation) => {
@@ -1272,29 +1304,31 @@ export function TerminalView() {
   return (
     <TooltipProvider delayDuration={150}>
       <main className="mx-auto flex h-[100dvh] min-h-screen w-full max-w-[1500px] flex-col gap-3 px-3 py-3 md:gap-4 md:px-6 md:py-4">
-        <header className="rounded-xl border border-border bg-card/70 px-4 py-2.5 shadow-sm backdrop-blur-sm">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <h1 className="font-heading text-xl tracking-tight">Command Center</h1>
+        {isHeaderVisible ? (
+          <header className="rounded-xl border border-border bg-card/70 px-4 py-2.5 shadow-sm backdrop-blur-sm">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h1 className="font-heading text-xl tracking-tight">Command Center</h1>
 
-            <div className="flex flex-wrap items-center gap-2">
-              <Badge variant={badgeVariantForConnection(connectionState)} className="font-mono uppercase tracking-wide">
-                {connectionBadgeText}
-              </Badge>
-              <Badge variant="secondary" className="font-mono uppercase tracking-wide">
-                {terminalState}
-              </Badge>
-              <Badge variant={healthQuery.data?.ok ? "success" : "outline"} className="font-mono uppercase tracking-wide">
-                API {healthQuery.data?.ok ? "healthy" : "pending"}
-              </Badge>
-              <Badge variant="outline" className="font-mono uppercase tracking-wide">
-                projects {projects.length}
-              </Badge>
-              <Badge variant="outline" className="font-mono uppercase tracking-wide">
-                sessions {sessions.length}
-              </Badge>
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge variant={badgeVariantForConnection(connectionState)} className="font-mono uppercase tracking-wide">
+                  {connectionBadgeText}
+                </Badge>
+                <Badge variant="secondary" className="font-mono uppercase tracking-wide">
+                  {terminalState}
+                </Badge>
+                <Badge variant={healthQuery.data?.ok ? "success" : "outline"} className="font-mono uppercase tracking-wide">
+                  API {healthQuery.data?.ok ? "healthy" : "pending"}
+                </Badge>
+                <Badge variant="outline" className="font-mono uppercase tracking-wide">
+                  projects {projects.length}
+                </Badge>
+                <Badge variant="outline" className="font-mono uppercase tracking-wide">
+                  sessions {sessions.length}
+                </Badge>
+              </div>
             </div>
-          </div>
-        </header>
+          </header>
+        ) : null}
 
         <ResizablePanelGroup
           key={isStackedLayout ? "stacked" : "split"}

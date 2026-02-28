@@ -167,6 +167,8 @@ Responsibilities:
   - new session (auto/custom)
   - delete session
   - reconnect
+  - hide header / show header
+- Persists header visibility preference in browser `localStorage` across sessions
 - Uses a shared confirmation dialog for destructive actions (delete session/project) instead of `window.confirm`
 - Includes a modal for per-project worktree settings
 
@@ -204,6 +206,7 @@ Stored in web storage:
 - Selected project ID in `sessionStorage`
 - Selected session ID per project in `sessionStorage`
 - Session order per project in `localStorage`
+- Header visibility in `localStorage` (`command-center.header-visible`)
 
 This keeps ordering and selection stable while allowing independent state per project.
 

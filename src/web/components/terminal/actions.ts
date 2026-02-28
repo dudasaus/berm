@@ -4,10 +4,12 @@ export type TerminalActionId =
   | "session.new.auto"
   | "session.new.custom"
   | "session.delete.current"
-  | "session.reconnect";
+  | "session.reconnect"
+  | "view.hide-header"
+  | "view.show-header";
 
-export type TerminalActionGroup = "Project" | "Session";
-export type TerminalActionIcon = "folder" | "plus" | "trash" | "refresh";
+export type TerminalActionGroup = "Project" | "Session" | "View";
+export type TerminalActionIcon = "folder" | "plus" | "trash" | "refresh" | "eye-open" | "eye-closed";
 export type TerminalActionSource = "palette" | "button" | "dropdown" | "row" | "fallback";
 
 export interface TerminalActionInvocation {
@@ -34,6 +36,7 @@ export interface TerminalActionContext {
   selectedProjectName: string | null;
   selectedSessionId: string | null;
   selectedSessionName: string | null;
+  isHeaderVisible: boolean;
   pending: {
     pickProject: boolean;
     createSession: boolean;
@@ -49,6 +52,8 @@ export interface TerminalActionHandlers {
   deleteProject: (projectId: string) => void;
   deleteSession: (request: { projectId: string; sessionId: string }) => void;
   reconnectSession: () => void;
+  hideHeader: () => void;
+  showHeader: () => void;
 }
 
 export interface TerminalActionDefinition {
@@ -227,6 +232,40 @@ export const TERMINAL_ACTIONS: TerminalActionDefinition[] = [
     },
     run: (_context, handlers) => {
       handlers.reconnectSession();
+    },
+  },
+  {
+    id: "view.hide-header",
+    label: "Hide Header",
+    description: "Hide the top site header.",
+    group: "View",
+    icon: "eye-closed",
+    keywords: ["header", "hide", "view", "chrome"],
+    getAvailability: (context) => {
+      if (!context.isHeaderVisible) {
+        return { enabled: false, disabledReason: "Header is already hidden" };
+      }
+      return { enabled: true };
+    },
+    run: (_context, handlers) => {
+      handlers.hideHeader();
+    },
+  },
+  {
+    id: "view.show-header",
+    label: "Show Header",
+    description: "Show the top site header.",
+    group: "View",
+    icon: "eye-open",
+    keywords: ["header", "show", "view", "chrome"],
+    getAvailability: (context) => {
+      if (context.isHeaderVisible) {
+        return { enabled: false, disabledReason: "Header is already visible" };
+      }
+      return { enabled: true };
+    },
+    run: (_context, handlers) => {
+      handlers.showHeader();
     },
   },
 ];
