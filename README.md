@@ -26,6 +26,16 @@ bun install
 bun run dev
 ```
 
+## Compile
+
+```bash
+bun run compile
+```
+
+- Produces a standalone binary at `./command-center`.
+- `compile.sh` can optionally move it to `~/.local/bin/command-center`.
+- Compilation is implemented in `scripts/compile.ts` using `Bun.build()` with the `bun-plugin-tailwind` plugin so frontend CSS is bundled correctly.
+
 ## Test
 
 ```bash

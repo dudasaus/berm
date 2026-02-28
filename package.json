@@ -5,6 +5,7 @@
   "private": true,
   "scripts": {
     "dev": "bun --hot src/server/index.ts",
+    "compile": "./compile.sh",
     "start": "bun src/server/index.ts",
     "test": "bun test",
     "typecheck": "bunx tsc --noEmit"

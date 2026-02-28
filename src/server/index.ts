@@ -335,7 +335,7 @@ export function createServerConfig(
 
 export function createServer(options: number | CreateServerOptions = {}) {
   const normalized: CreateServerOptions = typeof options === "number" ? { port: options } : options;
-  const port = normalized.port ?? Number(Bun.env.PORT ?? 3000);
+  const port = normalized.port ?? Number(Bun.env.COMMAND_CENTER_PORT ?? 3000);
   const manager = normalized.manager ?? createDefaultManager();
   const openProjectPicker = normalized.pickProjectDirectory ?? pickProjectDirectory;
   const config = createServerConfig(manager, openProjectPicker);

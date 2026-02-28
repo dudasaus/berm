@@ -247,8 +247,24 @@ Type check:
 bun run typecheck
 ```
 
+## Build / Packaging
+
+- Compile command: `bun run compile`
+- Wrapper script: `compile.sh`
+- Build implementation: `scripts/compile.ts`
+
+Important detail:
+
+- We compile via `Bun.build({ compile: true, plugins: [tailwindPlugin] })` instead of `bun build --compile ...` directly.
+- Reason: current Bun CLI compile flow does not apply `[serve.static].plugins` from `bunfig.toml`, which can skip Tailwind CSS processing for standalone binaries.
+
+Output behavior:
+
+- Build emits a standalone binary and normalizes it to `./command-center` at repository root.
+- `compile.sh` can optionally move this binary to `~/.local/bin/command-center`.
+
 ## Environment Variables
 
-- `PORT` (default `3000`)
+- `COMMAND_CENTER_PORT` (default `3000`)
 - `COMMAND_CENTER_TMUX_SOCKET` (optional tmux socket name override)
 - `COMMAND_CENTER_REGISTRY_PATH` (optional registry file override)
