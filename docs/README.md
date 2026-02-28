@@ -33,6 +33,7 @@ Responsibilities:
 
 - Serves frontend app
 - Exposes project/session REST APIs
+- Exposes GitHub PR/CI sync API for session tiles (`gh`-powered)
 - Handles WebSocket upgrades for terminal streams
 - Converts manager errors into structured JSON responses
 
@@ -122,6 +123,10 @@ Validation rules for selection:
 ### Sessions (project-scoped)
 
 - `GET /api/projects/:projectId/sessions`
+- `GET /api/projects/:projectId/sessions/github-sync`
+  - Uses GitHub CLI (`gh`) + local git branch resolution per session workspace
+  - Returns PR metadata and CI check summary for each session when available
+  - Response shape: `{ sessions: [{ sessionId, branchName, pr, ci, source, error? }], syncedAt, cached }`
 - `POST /api/projects/:projectId/sessions`
   - Main session: `{ mode: "main", name? }`
   - Worktree session: `{ mode: "worktree", branchName }`
@@ -166,6 +171,9 @@ Responsibilities:
 - Supports multi-session workspace layouts (`single`, `split`, `quad`) in the terminal pane
 - Supports per-slot session assignment with optional focus mode for one slot
 - Supports saving/loading named workspace presets per project
+- Supports cross-project pinned session board for quick switching
+- Renders per-session PR/CI sync badges in session rows and workspace slot headers
+- Renders workspace slot state badges (`Focused`, `Active`, `Live`) with tooltips
 - Exposes project actions (pick, enter path, settings, delete)
 - Uses a shared frontend action registry so commands can be invoked from both UI controls and command palette
 - Exposes a global command palette (`Cmd/Ctrl+K`) with session commands first, then project commands:
@@ -222,6 +230,7 @@ Stored in web storage:
 - Workspace layout per project in `localStorage` (`command-center.workspace-layout.<projectId>`)
 - Workspace slot assignments per project in `localStorage` (`command-center.workspace-slots.<projectId>`)
 - Workspace presets per project in `localStorage` (`command-center.workspace-presets.<projectId>`)
+- Cross-project pinned workspace board in `localStorage` (`command-center.workspace-board`)
 
 This keeps ordering and selection stable while allowing independent state per project.
 

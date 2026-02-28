@@ -18,6 +18,7 @@ export interface TerminalPaneHandle {
 interface TerminalPaneProps {
   projectId: string;
   sessionId: string;
+  onActivate: () => void;
   onConnectionStateChange: (state: TerminalConnectionState) => void;
   onTerminalStateChange: (state: TerminalStatusState) => void;
   onSessionUnavailable: (sessionId: string, reason: SessionUnavailableReason) => void;
@@ -70,7 +71,7 @@ function suppressPendingViewportRefresh(terminal: Terminal): void {
 }
 
 export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
-  ({ projectId, sessionId, onConnectionStateChange, onTerminalStateChange, onSessionUnavailable }, ref) => {
+  ({ projectId, sessionId, onActivate, onConnectionStateChange, onTerminalStateChange, onSessionUnavailable }, ref) => {
     const mountRef = useRef<HTMLDivElement | null>(null);
     const terminalRef = useRef<Terminal | null>(null);
     const fitAddonRef = useRef<FitAddon | null>(null);
@@ -83,6 +84,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
     const onConnectionStateChangeRef = useRef(onConnectionStateChange);
     const onTerminalStateChangeRef = useRef(onTerminalStateChange);
     const onSessionUnavailableRef = useRef(onSessionUnavailable);
+    const onActivateRef = useRef(onActivate);
 
     const desiredStateRef = useRef<"connected" | "closed">("connected");
 
@@ -97,6 +99,10 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
     useEffect(() => {
       onSessionUnavailableRef.current = onSessionUnavailable;
     }, [onSessionUnavailable]);
+
+    useEffect(() => {
+      onActivateRef.current = onActivate;
+    }, [onActivate]);
 
     const sendMessage = useCallback((message: ClientMessage) => {
       const socket = socketRef.current;
@@ -323,6 +329,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
         safeFitAndResize();
 
         onDataDispose = terminal.onData((data) => {
+          onActivateRef.current();
           sendMessage({ type: "input", data });
         });
 
@@ -411,6 +418,9 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
     return (
       <div
         ref={mountRef}
+        onMouseDownCapture={() => {
+          onActivateRef.current();
+        }}
         className="h-full min-h-0 w-full overflow-hidden bg-[#1f1811]"
         style={{ backgroundColor: TERMINAL_BG }}
       />

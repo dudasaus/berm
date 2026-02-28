@@ -20,6 +20,46 @@ type WebSocketData = {
   clientId: string;
 };
 
+type GitHubPullRequestState = "OPEN" | "CLOSED" | "MERGED";
+
+type GitHubSessionPrInfo = {
+  number: number;
+  title: string;
+  url: string;
+  state: GitHubPullRequestState;
+  isDraft: boolean;
+};
+
+type GitHubSessionCiState = "success" | "failure" | "pending" | "none";
+
+type GitHubSessionCiInfo = {
+  state: GitHubSessionCiState;
+  summary: string;
+  total: number;
+  passing: number;
+  failing: number;
+  pending: number;
+};
+
+type GitHubSessionSyncItem = {
+  sessionId: string;
+  branchName: string | null;
+  pr: GitHubSessionPrInfo | null;
+  ci: GitHubSessionCiInfo | null;
+  source: "github" | "none" | "error";
+  error?: string;
+};
+
+type GitHubSyncResponse = {
+  sessions: GitHubSessionSyncItem[];
+  syncedAt: string;
+  cached: boolean;
+};
+
+const GITHUB_SYNC_CACHE_TTL_MS = 15_000;
+const githubSyncCache = new Map<string, { expiresAtMs: number; payload: GitHubSyncResponse }>();
+const textDecoder = new TextDecoder();
+
 export interface SessionManagerLike {
   listProjects(): ProjectMetadata[];
   selectProject(path: string): ProjectMetadata;
@@ -139,6 +179,214 @@ function pickProjectDirectory(): Response {
   return Response.json({ path: stdout });
 }
 
+function runCommandSync(args: string[], cwd: string): { exitCode: number; stdout: string; stderr: string } {
+  try {
+    const result = Bun.spawnSync(args, {
+      cwd,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+
+    return {
+      exitCode: result.exitCode,
+      stdout: textDecoder.decode(result.stdout).trim(),
+      stderr: textDecoder.decode(result.stderr).trim(),
+    };
+  } catch (error) {
+    return {
+      exitCode: 1,
+      stdout: "",
+      stderr: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+function resolveSessionBranchName(session: SessionMetadata): string | null {
+  if (session.branchName && session.branchName.trim().length > 0) {
+    return session.branchName.trim();
+  }
+
+  const branchResult = runCommandSync(["git", "-C", session.workspacePath, "rev-parse", "--abbrev-ref", "HEAD"], session.workspacePath);
+  if (branchResult.exitCode !== 0 || !branchResult.stdout || branchResult.stdout === "HEAD") {
+    return null;
+  }
+
+  return branchResult.stdout;
+}
+
+function summarizeStatusChecks(statusCheckRollup: unknown): GitHubSessionCiInfo | null {
+  if (!Array.isArray(statusCheckRollup) || statusCheckRollup.length === 0) {
+    return null;
+  }
+
+  let passing = 0;
+  let failing = 0;
+  let pending = 0;
+
+  for (const check of statusCheckRollup) {
+    if (!check || typeof check !== "object") {
+      pending += 1;
+      continue;
+    }
+
+    const record = check as { status?: unknown; conclusion?: unknown };
+    const status = typeof record.status === "string" ? record.status.toUpperCase() : "";
+    const conclusion = typeof record.conclusion === "string" ? record.conclusion.toUpperCase() : "";
+
+    if (status && status !== "COMPLETED") {
+      pending += 1;
+      continue;
+    }
+
+    if (!conclusion) {
+      pending += 1;
+      continue;
+    }
+
+    if (conclusion === "SUCCESS" || conclusion === "NEUTRAL" || conclusion === "SKIPPED") {
+      passing += 1;
+      continue;
+    }
+
+    failing += 1;
+  }
+
+  const total = statusCheckRollup.length;
+  const summaryParts: string[] = [];
+  if (passing > 0) {
+    summaryParts.push(`${passing} passing`);
+  }
+  if (failing > 0) {
+    summaryParts.push(`${failing} failing`);
+  }
+  if (pending > 0) {
+    summaryParts.push(`${pending} pending`);
+  }
+
+  return {
+    state: failing > 0 ? "failure" : pending > 0 ? "pending" : passing > 0 ? "success" : "none",
+    summary: summaryParts.length > 0 ? summaryParts.join(", ") : "No checks",
+    total,
+    passing,
+    failing,
+    pending,
+  };
+}
+
+function buildGitHubSyncForSession(session: SessionMetadata): GitHubSessionSyncItem {
+  const branchName = resolveSessionBranchName(session);
+  if (!branchName) {
+    return {
+      sessionId: session.id,
+      branchName: null,
+      pr: null,
+      ci: null,
+      source: "none",
+    };
+  }
+
+  const ghResult = runCommandSync(
+    [
+      "gh",
+      "pr",
+      "list",
+      "--head",
+      branchName,
+      "--state",
+      "all",
+      "--json",
+      "number,title,url,state,isDraft,statusCheckRollup",
+      "--limit",
+      "1",
+    ],
+    session.workspacePath,
+  );
+
+  if (ghResult.exitCode !== 0) {
+    return {
+      sessionId: session.id,
+      branchName,
+      pr: null,
+      ci: null,
+      source: "error",
+      error: ghResult.stderr || "Unable to sync PR/CI status from GitHub",
+    };
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(ghResult.stdout);
+  } catch {
+    return {
+      sessionId: session.id,
+      branchName,
+      pr: null,
+      ci: null,
+      source: "error",
+      error: "GitHub CLI returned invalid JSON",
+    };
+  }
+
+  if (!Array.isArray(parsed) || parsed.length === 0 || !parsed[0] || typeof parsed[0] !== "object") {
+    return {
+      sessionId: session.id,
+      branchName,
+      pr: null,
+      ci: null,
+      source: "none",
+    };
+  }
+
+  const item = parsed[0] as {
+    number?: unknown;
+    title?: unknown;
+    url?: unknown;
+    state?: unknown;
+    isDraft?: unknown;
+    statusCheckRollup?: unknown;
+  };
+
+  const state = typeof item.state === "string" ? item.state.toUpperCase() : "";
+  const prState: GitHubPullRequestState =
+    state === "OPEN" || state === "CLOSED" || state === "MERGED" ? state : "OPEN";
+
+  return {
+    sessionId: session.id,
+    branchName,
+    pr: {
+      number: typeof item.number === "number" ? item.number : 0,
+      title: typeof item.title === "string" ? item.title : "",
+      url: typeof item.url === "string" ? item.url : "",
+      state: prState,
+      isDraft: item.isDraft === true,
+    },
+    ci: summarizeStatusChecks(item.statusCheckRollup),
+    source: "github",
+  };
+}
+
+function buildGitHubSyncResponse(manager: SessionManagerLike, projectId: string): GitHubSyncResponse {
+  const nowMs = Date.now();
+  const cached = githubSyncCache.get(projectId);
+  if (cached && cached.expiresAtMs > nowMs) {
+    return { ...cached.payload, cached: true };
+  }
+
+  const sessions = manager.listSessions(projectId);
+  const payload: GitHubSyncResponse = {
+    sessions: sessions.map((session) => buildGitHubSyncForSession(session)),
+    syncedAt: new Date(nowMs).toISOString(),
+    cached: false,
+  };
+
+  githubSyncCache.set(projectId, {
+    expiresAtMs: nowMs + GITHUB_SYNC_CACHE_TTL_MS,
+    payload,
+  });
+
+  return payload;
+}
+
 export function createServerConfig(
   manager: SessionManagerLike,
   openProjectPicker: () => Response = pickProjectDirectory,
@@ -229,6 +477,16 @@ export function createServerConfig(
           } catch (error) {
             return errorResponse(error);
           }
+        },
+      },
+      "/api/projects/:projectId/sessions/github-sync": {
+        GET: (req: Bun.BunRequest<"/api/projects/:projectId/sessions/github-sync">) => {
+          const project = manager.getProject(req.params.projectId);
+          if (!project) {
+            return Response.json({ error: "Project not found" }, { status: 404 });
+          }
+
+          return Response.json(buildGitHubSyncResponse(manager, req.params.projectId));
         },
       },
       "/api/projects/:projectId/sessions/worktree-hook-decision": {

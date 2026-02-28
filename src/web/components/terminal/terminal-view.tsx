@@ -13,7 +13,10 @@ import {
   GitMerge,
   GitPullRequest,
   Hammer,
+  MoreHorizontal,
   PauseCircle,
+  Pin,
+  PinOff,
   Plus,
   RefreshCw,
   Search,
@@ -74,6 +77,7 @@ const STACK_LAYOUT_BREAKPOINT_PX = 1100;
 const SELECTED_PROJECT_STORAGE_KEY = "command-center.selected-project-id";
 const HEADER_VISIBLE_STORAGE_KEY = "command-center.header-visible";
 const WIDE_MODE_STORAGE_KEY = "command-center.wide-mode";
+const WORKSPACE_BOARD_STORAGE_KEY = "command-center.workspace-board";
 const MAX_WORKSPACE_SLOTS = 4;
 const PALETTE_GROUP_ORDER: TerminalActionGroup[] = ["Session", "Project", "View"];
 
@@ -83,6 +87,12 @@ type WorkspaceLayoutPreset = {
   name: string;
   layout: WorkspaceLayoutMode;
   slots: Array<string | null>;
+};
+
+type WorkspaceBoardEntry = {
+  projectId: string;
+  sessionId: string;
+  pinnedAt: string;
 };
 
 function selectedSessionStorageKey(projectId: string) {
@@ -133,6 +143,42 @@ type SessionMetadata = {
   branchName: string | null;
   lifecycleState: SessionLifecycleState;
   lifecycleUpdatedAt: string;
+};
+
+type GitHubPullRequestState = "OPEN" | "CLOSED" | "MERGED";
+
+type SessionGitHubPrInfo = {
+  number: number;
+  title: string;
+  url: string;
+  state: GitHubPullRequestState;
+  isDraft: boolean;
+};
+
+type SessionGitHubCiState = "success" | "failure" | "pending" | "none";
+
+type SessionGitHubCiInfo = {
+  state: SessionGitHubCiState;
+  summary: string;
+  total: number;
+  passing: number;
+  failing: number;
+  pending: number;
+};
+
+type SessionGitHubSyncItem = {
+  sessionId: string;
+  branchName: string | null;
+  pr: SessionGitHubPrInfo | null;
+  ci: SessionGitHubCiInfo | null;
+  source: "github" | "none" | "error";
+  error?: string;
+};
+
+type SessionGitHubSyncResponse = {
+  sessions: SessionGitHubSyncItem[];
+  syncedAt: string;
+  cached: boolean;
 };
 
 type WorktreeHookExecutionDetails = {
@@ -255,6 +301,31 @@ async function fetchSessions(projectId: string) {
   }
 
   return payload.sessions ?? [];
+}
+
+async function fetchSession(projectId: string, sessionId: string): Promise<SessionMetadata | null> {
+  const response = await fetch(
+    `/api/projects/${encodeURIComponent(projectId)}/sessions/${encodeURIComponent(sessionId)}`,
+  );
+
+  if (response.status === 404) {
+    return null;
+  }
+
+  if (!response.ok) {
+    throw new Error(`session request failed with ${response.status}`);
+  }
+
+  return (await response.json()) as SessionMetadata;
+}
+
+async function fetchSessionGitHubSync(projectId: string): Promise<SessionGitHubSyncResponse> {
+  const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/sessions/github-sync`);
+  if (!response.ok) {
+    throw new Error(`github sync request failed with ${response.status}`);
+  }
+
+  return (await response.json()) as SessionGitHubSyncResponse;
 }
 
 async function createSession(
@@ -471,6 +542,35 @@ function badgeVariantForLifecycle(state: SessionLifecycleState) {
   }
 }
 
+function badgeVariantForPullRequest(state: GitHubPullRequestState, isDraft: boolean) {
+  if (state === "MERGED") {
+    return "success" as const;
+  }
+
+  if (state === "OPEN" && isDraft) {
+    return "secondary" as const;
+  }
+
+  if (state === "OPEN") {
+    return "warning" as const;
+  }
+
+  return "outline" as const;
+}
+
+function badgeVariantForCi(state: SessionGitHubCiState) {
+  if (state === "success") {
+    return "success" as const;
+  }
+  if (state === "pending") {
+    return "warning" as const;
+  }
+  if (state === "failure") {
+    return "warning" as const;
+  }
+  return "outline" as const;
+}
+
 function formatRelativeDuration(isoTime: string, nowMs: number): string {
   const parsedMs = Date.parse(isoTime);
   if (Number.isNaN(parsedMs)) {
@@ -635,6 +735,42 @@ function readStoredWorkspacePresets(projectId: string): WorkspaceLayoutPreset[] 
   }
 }
 
+function readStoredWorkspaceBoard(): WorkspaceBoardEntry[] {
+  if (typeof window === "undefined") {
+    return [];
+  }
+
+  const raw = window.localStorage.getItem(WORKSPACE_BOARD_STORAGE_KEY);
+  if (!raw) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+
+    return parsed
+      .map((value) => {
+        if (!value || typeof value !== "object") {
+          return null;
+        }
+        const entry = value as Partial<WorkspaceBoardEntry>;
+        const projectId = typeof entry.projectId === "string" ? entry.projectId.trim() : "";
+        const sessionId = typeof entry.sessionId === "string" ? entry.sessionId.trim() : "";
+        const pinnedAt = typeof entry.pinnedAt === "string" ? entry.pinnedAt : new Date().toISOString();
+        if (!projectId || !sessionId) {
+          return null;
+        }
+        return { projectId, sessionId, pinnedAt };
+      })
+      .filter((entry): entry is WorkspaceBoardEntry => entry !== null);
+  } catch {
+    return [];
+  }
+}
+
 function promptForOptionalSessionName(): string | undefined | null {
   const provided = window.prompt(
     "Enter a session name (letters, numbers, underscores, hyphens). Leave blank for auto-generated.",
@@ -775,10 +911,12 @@ export function TerminalView() {
   const [terminalStateBySessionId, setTerminalStateBySessionId] = useState<Record<string, TerminalStatusState>>({});
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(() => readStoredProjectId());
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
+  const [activeWorkspaceSessionId, setActiveWorkspaceSessionId] = useState<string | null>(null);
   const [sessionOrder, setSessionOrder] = useState<string[]>([]);
   const [workspaceLayout, setWorkspaceLayout] = useState<WorkspaceLayoutMode>("single");
   const [workspaceSlots, setWorkspaceSlots] = useState<Array<string | null>>([]);
   const [workspacePresets, setWorkspacePresets] = useState<WorkspaceLayoutPreset[]>([]);
+  const [workspaceBoard, setWorkspaceBoard] = useState<WorkspaceBoardEntry[]>(() => readStoredWorkspaceBoard());
   const [focusedWorkspaceSlot, setFocusedWorkspaceSlot] = useState<number | null>(null);
   const [isProjectSectionOpen, setIsProjectSectionOpen] = useState(true);
   const [isSessionSectionOpen, setIsSessionSectionOpen] = useState(true);
@@ -904,6 +1042,7 @@ export function TerminalView() {
       setWorkspacePresets([]);
     }
     setFocusedWorkspaceSlot(null);
+    setActiveWorkspaceSessionId(null);
   }, [selectedProjectId]);
 
   useEffect(() => {
@@ -952,6 +1091,14 @@ export function TerminalView() {
   }, [selectedProjectId, workspacePresets]);
 
   useEffect(() => {
+    setActiveWorkspaceSessionId(selectedSessionId);
+  }, [selectedSessionId]);
+
+  useEffect(() => {
+    window.localStorage.setItem(WORKSPACE_BOARD_STORAGE_KEY, JSON.stringify(workspaceBoard));
+  }, [workspaceBoard]);
+
+  useEffect(() => {
     window.localStorage.setItem(HEADER_VISIBLE_STORAGE_KEY, isHeaderVisible ? "true" : "false");
   }, [isHeaderVisible]);
 
@@ -983,6 +1130,18 @@ export function TerminalView() {
     refetchInterval: 2_500,
   });
 
+  const sessionGitHubSyncQuery = useQuery({
+    queryKey: ["sessions-github-sync", selectedProjectId],
+    queryFn: async () => {
+      if (!selectedProjectId) {
+        return { sessions: [], syncedAt: new Date(0).toISOString(), cached: false } as SessionGitHubSyncResponse;
+      }
+      return fetchSessionGitHubSync(selectedProjectId);
+    },
+    enabled: Boolean(selectedProjectId),
+    refetchInterval: 20_000,
+  });
+
   const selectProjectMutation = useMutation({
     mutationFn: selectProject,
     onSuccess: (project) => {
@@ -990,6 +1149,7 @@ export function TerminalView() {
       toast.success(`Selected project ${project.name}`);
       void queryClient.invalidateQueries({ queryKey: ["projects"] });
       void queryClient.invalidateQueries({ queryKey: ["sessions", project.id] });
+      void queryClient.invalidateQueries({ queryKey: ["sessions-github-sync", project.id] });
     },
     onError: (error) => {
       toast.error(error instanceof Error ? error.message : String(error));
@@ -1011,6 +1171,7 @@ export function TerminalView() {
 
       void queryClient.invalidateQueries({ queryKey: ["projects"] });
       void queryClient.invalidateQueries({ queryKey: ["sessions"] });
+      void queryClient.invalidateQueries({ queryKey: ["sessions-github-sync"] });
     },
     onError: (error) => {
       toast.error(error instanceof Error ? error.message : String(error));
@@ -1023,6 +1184,7 @@ export function TerminalView() {
       toast.success(`Updated project ${project.name}`);
       void queryClient.invalidateQueries({ queryKey: ["projects"] });
       void queryClient.invalidateQueries({ queryKey: ["sessions", project.id] });
+      void queryClient.invalidateQueries({ queryKey: ["sessions-github-sync", project.id] });
       setIsProjectSettingsOpen(false);
     },
     onError: (error) => {
@@ -1056,6 +1218,7 @@ export function TerminalView() {
         }
       }
       void queryClient.invalidateQueries({ queryKey: ["sessions", created.session.projectId] });
+      void queryClient.invalidateQueries({ queryKey: ["sessions-github-sync", created.session.projectId] });
     },
     onError: (error) => {
       if (error instanceof ApiRequestError && error.code === "WORKTREE_HOOK_FAILED") {
@@ -1111,9 +1274,11 @@ export function TerminalView() {
         setSelectedSessionId(result.session.id);
         toast.success(`Created session ${result.session.id} after hook failure`);
         void queryClient.invalidateQueries({ queryKey: ["sessions", result.session.projectId] });
+        void queryClient.invalidateQueries({ queryKey: ["sessions-github-sync", result.session.projectId] });
       } else {
         toast.message("Worktree setup aborted and cleaned up");
         void queryClient.invalidateQueries({ queryKey: ["sessions", request.projectId] });
+        void queryClient.invalidateQueries({ queryKey: ["sessions-github-sync", request.projectId] });
       }
 
       setWorktreeHookFailure(null);
@@ -1144,6 +1309,7 @@ export function TerminalView() {
       }
 
       void queryClient.invalidateQueries({ queryKey: ["sessions", request.projectId] });
+      void queryClient.invalidateQueries({ queryKey: ["sessions-github-sync", request.projectId] });
     },
     onError: (error) => {
       toast.error(error instanceof Error ? error.message : String(error));
@@ -1155,6 +1321,7 @@ export function TerminalView() {
     onSuccess: (session) => {
       toast.success(`Session ${session.id}: ${SESSION_LIFECYCLE_LABELS[session.lifecycleState]}`);
       void queryClient.invalidateQueries({ queryKey: ["sessions", session.projectId] });
+      void queryClient.invalidateQueries({ queryKey: ["sessions-github-sync", session.projectId] });
     },
     onError: (error) => {
       toast.error(error instanceof Error ? error.message : String(error));
@@ -1166,6 +1333,14 @@ export function TerminalView() {
     () => projects.find((project) => project.id === selectedProjectId) ?? null,
     [projects, selectedProjectId],
   );
+  const workspaceBoardItems = useMemo(() => {
+    return workspaceBoard
+      .map((entry) => ({
+        ...entry,
+        project: projects.find((project) => project.id === entry.projectId) ?? null,
+      }))
+      .sort((a, b) => b.pinnedAt.localeCompare(a.pinnedAt));
+  }, [projects, workspaceBoard]);
 
   useEffect(() => {
     if (!selectedProject) {
@@ -1198,6 +1373,17 @@ export function TerminalView() {
 
     setSelectedProjectId(projects[0]?.id ?? null);
   }, [projects, selectedProjectId]);
+
+  useEffect(() => {
+    const validProjectIds = new Set(projects.map((project) => project.id));
+    setWorkspaceBoard((previous) => {
+      const filtered = previous.filter((entry) => validProjectIds.has(entry.projectId));
+      if (filtered.length === previous.length) {
+        return previous;
+      }
+      return filtered;
+    });
+  }, [projects]);
 
   const sessions = sessionsQuery.data ?? [];
   const orderedSessions = useMemo(() => {
@@ -1251,6 +1437,10 @@ export function TerminalView() {
   const sessionById = useMemo(() => {
     return new Map(orderedSessions.map((session) => [session.id, session]));
   }, [orderedSessions]);
+  const sessionGitHubSyncById = useMemo(() => {
+    const entries = sessionGitHubSyncQuery.data?.sessions ?? [];
+    return new Map(entries.map((entry) => [entry.sessionId, entry]));
+  }, [sessionGitHubSyncQuery.data]);
   const workspacePaneCount = paneCountForLayout(workspaceLayout);
   const resolvedWorkspaceSlots = useMemo(() => {
     const next: Array<string | null> = Array.from({ length: MAX_WORKSPACE_SLOTS }, () => null);
@@ -1317,6 +1507,19 @@ export function TerminalView() {
       setSelectedSessionId(firstSession.id);
     }
   }, [orderedSessions, selectedProjectId, selectedSessionId]);
+
+  useEffect(() => {
+    const validSessionIds = new Set(orderedSessions.map((session) => session.id));
+    setActiveWorkspaceSessionId((current) => {
+      if (current && validSessionIds.has(current)) {
+        return current;
+      }
+      if (selectedSessionId && validSessionIds.has(selectedSessionId)) {
+        return selectedSessionId;
+      }
+      return orderedSessions[0]?.id ?? null;
+    });
+  }, [orderedSessions, selectedSessionId]);
 
   useEffect(() => {
     const validSessionIds = new Set(orderedSessions.map((session) => session.id));
@@ -1602,6 +1805,67 @@ export function TerminalView() {
     });
   }, []);
 
+  const workspaceBoardKey = useCallback((entry: Pick<WorkspaceBoardEntry, "projectId" | "sessionId">) => {
+    return `${entry.projectId}::${entry.sessionId}`;
+  }, []);
+
+  const isSessionPinned = useCallback(
+    (projectId: string, sessionId: string) => {
+      return workspaceBoard.some((entry) => entry.projectId === projectId && entry.sessionId === sessionId);
+    },
+    [workspaceBoard],
+  );
+
+  const pinSessionToWorkspaceBoard = useCallback((projectId: string, sessionId: string) => {
+    setWorkspaceBoard((previous) => {
+      if (previous.some((entry) => entry.projectId === projectId && entry.sessionId === sessionId)) {
+        return previous;
+      }
+
+      return [
+        ...previous,
+        {
+          projectId,
+          sessionId,
+          pinnedAt: new Date().toISOString(),
+        },
+      ];
+    });
+    toast.success(`Pinned ${sessionId} to workspace board`);
+  }, []);
+
+  const unpinSessionFromWorkspaceBoard = useCallback(
+    (projectId: string, sessionId: string, options?: { silent?: boolean }) => {
+      setWorkspaceBoard((previous) => {
+        const next = previous.filter((entry) => !(entry.projectId === projectId && entry.sessionId === sessionId));
+        if (next.length === previous.length) {
+          return previous;
+        }
+        return next;
+      });
+      if (!options?.silent) {
+        toast.message(`Removed ${sessionId} from workspace board`);
+      }
+    },
+    [],
+  );
+
+  const openWorkspaceBoardEntry = useCallback(
+    async (entry: WorkspaceBoardEntry) => {
+      const metadata = await fetchSession(entry.projectId, entry.sessionId);
+      if (!metadata) {
+        unpinSessionFromWorkspaceBoard(entry.projectId, entry.sessionId, { silent: true });
+        toast.warning(`Pinned session ${entry.sessionId} no longer exists`);
+        return;
+      }
+
+      setSelectedProjectId(entry.projectId);
+      setSelectedSessionId(entry.sessionId);
+      toast.success(`Opened ${entry.sessionId}`);
+    },
+    [unpinSessionFromWorkspaceBoard],
+  );
+
   const setWorkspaceSlotSession = useCallback((slotIndex: number, sessionId: string | null) => {
     setWorkspaceSlots((previous) => {
       const next = Array.from({ length: MAX_WORKSPACE_SLOTS }, (_unused, index) => previous[index] ?? null);
@@ -1663,6 +1927,7 @@ export function TerminalView() {
       toast.warning(reason === "deleted" ? `Session ${sessionId} was deleted` : `Session ${sessionId} was not found`);
       if (selectedProjectId) {
         void queryClient.invalidateQueries({ queryKey: ["sessions", selectedProjectId] });
+        void queryClient.invalidateQueries({ queryKey: ["sessions-github-sync", selectedProjectId] });
       }
     },
     [queryClient, selectedProjectId],
@@ -2082,12 +2347,20 @@ export function TerminalView() {
                             const position = sessionOrder.indexOf(session.id);
                             const canMoveUp = position > 0;
                             const canMoveDown = position !== -1 && position < sessionOrder.length - 1;
-                            const lifecycleDuration = formatRelativeDuration(session.lifecycleUpdatedAt, nowMs);
+                            const canDeleteSession = getActionAvailability("session.delete.current", {
+                              source: "row",
+                              projectId: selectedProjectId ?? undefined,
+                              sessionId: session.id,
+                            }).enabled;
+                            const sessionSync = sessionGitHubSyncById.get(session.id) ?? null;
+                            const isPinned = isSessionPinned(session.projectId, session.id);
 
                             return (
                               <div
                                 key={session.id}
-                                className={`rounded-md border p-2 ${isSelected ? "border-primary/60 bg-primary/10" : "border-border bg-card/60"}`}
+                                className={`rounded-md border p-2 transition-colors ${
+                                  isSelected ? "border-primary/60 bg-primary/10" : "border-border bg-card/60"
+                                }`}
                               >
                                 <div className="flex items-center gap-2">
                                   <button
@@ -2108,74 +2381,42 @@ export function TerminalView() {
                                     </p>
                                     <div className="mt-1 flex flex-wrap items-center gap-1">
                                       <Badge
-                                        variant={badgeVariantForLifecycle(session.lifecycleState)}
-                                        className="font-mono text-[10px] uppercase tracking-wide"
-                                      >
-                                        {SESSION_LIFECYCLE_LABELS[session.lifecycleState]} · {lifecycleDuration}
-                                      </Badge>
-                                      <Badge
                                         variant={session.workspaceType === "worktree" ? "secondary" : "outline"}
                                         className="font-mono text-[10px] uppercase tracking-wide"
                                       >
                                         {session.workspaceType}
                                       </Badge>
+                                      {sessionSync?.pr ? (
+                                        <Badge
+                                          variant={badgeVariantForPullRequest(sessionSync.pr.state, sessionSync.pr.isDraft)}
+                                          className="font-mono text-[10px] uppercase tracking-wide"
+                                        >
+                                          PR #{sessionSync.pr.number}{" "}
+                                          {sessionSync.pr.state === "OPEN"
+                                            ? sessionSync.pr.isDraft
+                                              ? "draft"
+                                              : "open"
+                                            : sessionSync.pr.state.toLowerCase()}
+                                        </Badge>
+                                      ) : null}
+                                      {sessionSync?.ci ? (
+                                        <Badge
+                                          variant={badgeVariantForCi(sessionSync.ci.state)}
+                                          className="font-mono text-[10px] uppercase tracking-wide"
+                                        >
+                                          CI {sessionSync.ci.state} · {sessionSync.ci.summary}
+                                        </Badge>
+                                      ) : null}
+                                      {sessionSync?.source === "error" ? (
+                                        <Badge variant="outline" className="font-mono text-[10px] uppercase tracking-wide">
+                                          PR sync unavailable
+                                        </Badge>
+                                      ) : null}
                                       <span className="truncate font-mono text-[10px] text-muted-foreground">
                                         {session.workspaceType === "worktree" ? session.workspacePath : "project root"}
                                       </span>
                                     </div>
                                   </button>
-
-                                  <div className="flex items-center">
-                                    <Tooltip>
-                                      <TooltipTrigger asChild>
-                                        <Button
-                                          size="icon"
-                                          variant="ghost"
-                                          className="h-7 w-7"
-                                          onClick={() => {
-                                            addSessionToWorkspace(session.id);
-                                          }}
-                                        >
-                                          <Plus className="h-4 w-4" />
-                                        </Button>
-                                      </TooltipTrigger>
-                                      <TooltipContent>Add to workspace</TooltipContent>
-                                    </Tooltip>
-
-                                    <Tooltip>
-                                      <TooltipTrigger asChild>
-                                        <Button
-                                          size="icon"
-                                          variant="ghost"
-                                          className="h-7 w-7"
-                                          disabled={!canMoveUp}
-                                          onClick={() => {
-                                            moveSession(session.id, -1);
-                                          }}
-                                        >
-                                          <ChevronUp className="h-4 w-4" />
-                                        </Button>
-                                      </TooltipTrigger>
-                                      <TooltipContent>Move up</TooltipContent>
-                                    </Tooltip>
-
-                                    <Tooltip>
-                                      <TooltipTrigger asChild>
-                                        <Button
-                                          size="icon"
-                                          variant="ghost"
-                                          className="h-7 w-7"
-                                          disabled={!canMoveDown}
-                                          onClick={() => {
-                                            moveSession(session.id, 1);
-                                          }}
-                                        >
-                                          <ChevronDown className="h-4 w-4" />
-                                        </Button>
-                                      </TooltipTrigger>
-                                      <TooltipContent>Move down</TooltipContent>
-                                    </Tooltip>
-                                  </div>
 
                                   <DropdownMenu>
                                     <DropdownMenuTrigger asChild>
@@ -2213,32 +2454,64 @@ export function TerminalView() {
                                     </DropdownMenuContent>
                                   </DropdownMenu>
 
-                                  <Tooltip>
-                                    <TooltipTrigger asChild>
-                                      <Button
-                                        size="icon"
-                                        variant="ghost"
-                                        className="h-7 w-7"
-                                        onClick={() => {
+                                  <DropdownMenu>
+                                    <DropdownMenuTrigger asChild>
+                                      <Button size="icon" variant="ghost" className="h-7 w-7">
+                                        <MoreHorizontal className="h-4 w-4" />
+                                      </Button>
+                                    </DropdownMenuTrigger>
+                                    <DropdownMenuContent align="end" className="w-56">
+                                      <DropdownMenuLabel>Session Actions</DropdownMenuLabel>
+                                      <DropdownMenuSeparator />
+                                      <DropdownMenuItem
+                                        onSelect={() => {
+                                          addSessionToWorkspace(session.id);
+                                        }}
+                                      >
+                                        Add to workspace
+                                      </DropdownMenuItem>
+                                      <DropdownMenuItem
+                                        onSelect={() => {
+                                          if (isPinned) {
+                                            unpinSessionFromWorkspaceBoard(session.projectId, session.id);
+                                            return;
+                                          }
+                                          pinSessionToWorkspaceBoard(session.projectId, session.id);
+                                        }}
+                                      >
+                                        {isPinned ? "Unpin from board" : "Pin to cross-project board"}
+                                      </DropdownMenuItem>
+                                      <DropdownMenuItem
+                                        disabled={!canMoveUp}
+                                        onSelect={() => {
+                                          moveSession(session.id, -1);
+                                        }}
+                                      >
+                                        Move up
+                                      </DropdownMenuItem>
+                                      <DropdownMenuItem
+                                        disabled={!canMoveDown}
+                                        onSelect={() => {
+                                          moveSession(session.id, 1);
+                                        }}
+                                      >
+                                        Move down
+                                      </DropdownMenuItem>
+                                      <DropdownMenuSeparator />
+                                      <DropdownMenuItem
+                                        disabled={!canDeleteSession}
+                                        onSelect={() => {
                                           runAction("session.delete.current", {
                                             source: "row",
                                             projectId: selectedProjectId ?? undefined,
                                             sessionId: session.id,
                                           });
                                         }}
-                                        disabled={
-                                          !getActionAvailability("session.delete.current", {
-                                            source: "row",
-                                            projectId: selectedProjectId ?? undefined,
-                                            sessionId: session.id,
-                                          }).enabled
-                                        }
                                       >
-                                        <Trash2 className="h-4 w-4" />
-                                      </Button>
-                                    </TooltipTrigger>
-                                    <TooltipContent>Delete session</TooltipContent>
-                                  </Tooltip>
+                                        Delete session
+                                      </DropdownMenuItem>
+                                    </DropdownMenuContent>
+                                  </DropdownMenu>
                                 </div>
                               </div>
                             );
@@ -2247,6 +2520,90 @@ export function TerminalView() {
                       )}
                     </div>
                   ) : null}
+                </section>
+
+                <section className="rounded-md border border-border bg-card/60 p-2">
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-mono text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                        Cross-Project Board
+                      </span>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="h-7 px-2 font-mono text-[10px]"
+                        disabled={!selectedSession}
+                        onClick={() => {
+                          if (!selectedSession) {
+                            return;
+                          }
+
+                          if (isSessionPinned(selectedSession.projectId, selectedSession.id)) {
+                            unpinSessionFromWorkspaceBoard(selectedSession.projectId, selectedSession.id);
+                            return;
+                          }
+
+                          pinSessionToWorkspaceBoard(selectedSession.projectId, selectedSession.id);
+                        }}
+                      >
+                        {selectedSession && isSessionPinned(selectedSession.projectId, selectedSession.id) ? "Unpin selected" : "Pin selected"}
+                      </Button>
+                    </div>
+
+                    {workspaceBoardItems.length === 0 ? (
+                      <p className="font-mono text-[11px] text-muted-foreground">No pinned sessions yet.</p>
+                    ) : (
+                      <div className="max-h-44 space-y-1 overflow-y-auto pr-1">
+                        {workspaceBoardItems.map((entry) => {
+                          const entryKey = workspaceBoardKey(entry);
+                          const isActive =
+                            selectedProjectId === entry.projectId && selectedSessionId === entry.sessionId;
+
+                          return (
+                            <div
+                              key={entryKey}
+                              className={`rounded-sm border px-2 py-1.5 ${
+                                isActive ? "border-primary/60 bg-primary/10" : "border-border bg-card"
+                              }`}
+                            >
+                              <div className="flex items-center justify-between gap-2">
+                                <div className="min-w-0">
+                                  <p className="truncate font-mono text-xs font-semibold">{entry.sessionId}</p>
+                                  <p className="truncate font-mono text-[11px] text-muted-foreground">
+                                    {entry.project?.name ?? entry.projectId}
+                                  </p>
+                                </div>
+                                <div className="flex items-center gap-1">
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    className="h-7 px-2 font-mono text-[10px]"
+                                    onClick={() => {
+                                      void openWorkspaceBoardEntry(entry).catch((error) => {
+                                        toast.error(error instanceof Error ? error.message : String(error));
+                                      });
+                                    }}
+                                  >
+                                    Open
+                                  </Button>
+                                  <Button
+                                    size="icon"
+                                    variant="ghost"
+                                    className="h-7 w-7"
+                                    onClick={() => {
+                                      unpinSessionFromWorkspaceBoard(entry.projectId, entry.sessionId);
+                                    }}
+                                  >
+                                    <PinOff className="h-4 w-4" />
+                                  </Button>
+                                </div>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
                 </section>
 
                 {selectedSession ? (
@@ -2393,20 +2750,85 @@ export function TerminalView() {
                     <div className={workspaceGridClass}>
                       {displayedWorkspaceItems.map(({ slotIndex, session }) => {
                         const slotSessionId = resolvedWorkspaceSlots[slotIndex] ?? "";
+                        const slotSessionSync = session ? (sessionGitHubSyncById.get(session.id) ?? null) : null;
+                        const isFocusedSlot = focusedWorkspaceSlot === slotIndex;
+                        const isActiveSlot = Boolean(session && session.id === activeWorkspaceSessionId);
+                        const slotContainerClass = isFocusedSlot
+                          ? "flex min-h-0 flex-col overflow-hidden rounded-md border-2 border-amber-300 bg-[#2b1a0b] shadow-[0_0_0_1px_rgba(252,211,77,0.55),0_16px_34px_rgba(0,0,0,0.42)]"
+                          : isActiveSlot
+                            ? "flex min-h-0 flex-col overflow-hidden rounded-md border border-amber-300/60 bg-[#23170f] shadow-[0_0_0_1px_rgba(252,211,77,0.22)]"
+                            : "flex min-h-0 flex-col overflow-hidden rounded-md border border-border/40 bg-[#1a130f]";
+                        const slotStatusClass = isFocusedSlot
+                          ? "border-amber-200/90 bg-amber-300/25 text-amber-100"
+                          : isActiveSlot
+                            ? "border-amber-300/60 bg-amber-300/15 text-amber-100"
+                            : "border-border/70 bg-card/65 text-muted-foreground";
+                        const slotStatusLabel = isFocusedSlot ? "Focused" : isActiveSlot ? "Active" : "Live";
+                        const slotStatusTooltip = isFocusedSlot
+                          ? "Focused: this slot is in focus mode and is the only pane being shown."
+                          : isActiveSlot
+                            ? "Active: this is the terminal you most recently interacted with."
+                            : "Live: this slot is running a session but is not currently active.";
 
                         return (
-                          <div
-                            key={`workspace-slot-${slotIndex}`}
-                            className="flex min-h-0 flex-col overflow-hidden rounded-md border border-border/40 bg-[#1a130f]"
-                          >
-                            <div className="flex items-center justify-between gap-2 border-b border-border/40 bg-card/40 p-2">
+                          <div key={`workspace-slot-${slotIndex}`} className={slotContainerClass}>
+                            <div
+                              className={`h-0.5 w-full ${isFocusedSlot ? "bg-amber-300" : isActiveSlot ? "bg-amber-300/55" : "bg-transparent"}`}
+                              aria-hidden
+                            />
+                            <div
+                              className={`flex items-center justify-between gap-2 border-b border-border/40 p-2 ${
+                                isFocusedSlot ? "bg-amber-200/10" : isActiveSlot ? "bg-amber-200/5" : "bg-card/40"
+                              }`}
+                            >
                               <div className="min-w-0">
-                                <p className="truncate font-mono text-[11px] font-semibold uppercase tracking-wide text-foreground/80">
-                                  Slot {slotIndex + 1}
-                                </p>
+                                <div className="flex items-center gap-1.5">
+                                  <p
+                                    className={`truncate font-mono text-[11px] font-semibold uppercase tracking-wide ${
+                                      isFocusedSlot ? "text-amber-100" : isActiveSlot ? "text-amber-50" : "text-foreground/80"
+                                    }`}
+                                  >
+                                    Slot {slotIndex + 1}
+                                  </p>
+                                  {session ? (
+                                    <Tooltip>
+                                      <TooltipTrigger asChild>
+                                        <span
+                                          className={`rounded-sm border px-1.5 py-0.5 font-mono text-[10px] font-semibold uppercase tracking-wide ${slotStatusClass}`}
+                                        >
+                                          {slotStatusLabel}
+                                        </span>
+                                      </TooltipTrigger>
+                                      <TooltipContent>{slotStatusTooltip}</TooltipContent>
+                                    </Tooltip>
+                                  ) : null}
+                                </div>
                                 <p className="truncate font-mono text-xs font-semibold text-foreground">
                                   {session ? session.id : "No session selected"}
                                 </p>
+                                {slotSessionSync?.pr || slotSessionSync?.ci ? (
+                                  <div className="mt-1 flex flex-wrap items-center gap-1">
+                                    {slotSessionSync.pr ? (
+                                      <Badge
+                                        variant={badgeVariantForPullRequest(
+                                          slotSessionSync.pr.state,
+                                          slotSessionSync.pr.isDraft,
+                                        )}
+                                        className="font-mono text-[10px] uppercase tracking-wide"
+                                      >
+                                        PR #{slotSessionSync.pr.number}
+                                      </Badge>
+                                    ) : null}
+                                    {slotSessionSync.ci ? (
+                                      <Badge
+                                        variant={badgeVariantForCi(slotSessionSync.ci.state)}
+                                        className="font-mono text-[10px] uppercase tracking-wide"
+                                      >
+                                        CI {slotSessionSync.ci.state}
+                                      </Badge>
+                                    ) : null}
+                                  </div>
+                                ) : null}
                               </div>
 
                               <div className="flex items-center gap-1">
@@ -2472,6 +2894,9 @@ export function TerminalView() {
                                   }}
                                   projectId={selectedProjectId}
                                   sessionId={session.id}
+                                  onActivate={() => {
+                                    setActiveWorkspaceSessionId(session.id);
+                                  }}
                                   onConnectionStateChange={(state) => {
                                     setConnectionBySessionId((previous) => {
                                       if (previous[session.id] === state) {

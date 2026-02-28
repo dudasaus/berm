@@ -17,6 +17,9 @@ Web terminal app powered by Bun PTY + zsh on the backend and TanStack React + xt
 - Sessions have a persisted lifecycle state (`planning`, `exploration`, `implementing`, `in_review`, `submitted_pr`, `merged`, `blocked`, `paused`) that can be changed from the command palette or session list.
 - The terminal area supports parallel workspace layouts (`1-up`, `2-up`, `4-up`) with per-slot session selection and optional focus mode.
 - Workspace layouts and presets are saved per project in local storage.
+- A cross-project workspace board lets you pin sessions from any project and jump back to them quickly.
+- Workspace slot headers show `Focused` / `Active` / `Live` status with tooltips for quick context.
+- Session tiles can show synced GitHub PR/CI status via `gh` (`open`/`draft`/`merged` and check summary).
 
 ## Docs
 
