@@ -9,6 +9,11 @@ import {
   type TerminalStatusState,
 } from "../shared/protocol";
 import {
+  DEFAULT_SESSION_LIFECYCLE_STATE,
+  isSessionLifecycleState,
+  type SessionLifecycleState,
+} from "../shared/session-lifecycle";
+import {
   defaultSessionRegistryPath,
   loadSessionRegistry,
   saveSessionRegistry,
@@ -50,6 +55,8 @@ export interface SessionMetadata {
   workspaceType: SessionWorkspaceType;
   workspacePath: string;
   branchName: string | null;
+  lifecycleState: SessionLifecycleState;
+  lifecycleUpdatedAt: string;
 }
 
 export type CreateSessionRequest =
@@ -61,6 +68,10 @@ export interface UpdateProjectRequest {
   worktreeParentPath?: string | null;
   worktreeHookCommand?: string | null;
   worktreeHookTimeoutMs?: number;
+}
+
+export interface UpdateSessionLifecycleRequest {
+  lifecycleState: SessionLifecycleState;
 }
 
 export interface WorktreeHookExecutionDetails {
@@ -115,6 +126,8 @@ interface TerminalSession {
   workspaceType: SessionWorkspaceType;
   workspacePath: string;
   branchName: string | null;
+  lifecycleState: SessionLifecycleState;
+  lifecycleUpdatedAtMs: number;
 }
 
 interface TmuxSessionRef {
@@ -727,6 +740,56 @@ export class TerminalSessionManager {
     return true;
   }
 
+  updateSessionLifecycleState(projectId: string, sessionId: string, input: UpdateSessionLifecycleRequest): SessionMetadata {
+    this.syncSessionsFromTmux();
+    this.assertAvailable();
+    this.requireProject(projectId);
+
+    if (!input || !isSessionLifecycleState(input.lifecycleState)) {
+      throw new SessionManagerError(
+        "lifecycleState is invalid",
+        400,
+        "SESSION_LIFECYCLE_INVALID",
+      );
+    }
+
+    const key = this.sessionKey(projectId, sessionId);
+    const session = this.sessions.get(key);
+    if (!session) {
+      throw new SessionManagerError("Session not found", 404, "SESSION_NOT_FOUND");
+    }
+
+    const nowMs = Date.now();
+    const nowIso = new Date(nowMs).toISOString();
+    session.lifecycleState = input.lifecycleState;
+    session.lifecycleUpdatedAtMs = nowMs;
+
+    const existingRegistryEntry = this.registrySessions.get(key);
+    if (existingRegistryEntry) {
+      this.registrySessions.set(key, {
+        ...existingRegistryEntry,
+        lifecycleState: input.lifecycleState,
+        lifecycleUpdatedAt: nowIso,
+      });
+    } else {
+      this.registrySessions.set(key, {
+        projectId: session.projectId,
+        sessionId: session.id,
+        tmuxSessionName: session.tmuxSessionName,
+        createdAt: new Date(session.createdAtMs).toISOString(),
+        lastActiveAt: new Date(session.lastActiveAtMs).toISOString(),
+        workspaceType: session.workspaceType,
+        workspacePath: session.workspacePath,
+        branchName: session.branchName,
+        lifecycleState: input.lifecycleState,
+        lifecycleUpdatedAt: nowIso,
+      });
+    }
+
+    this.saveRegistry();
+    return this.toMetadata(session);
+  }
+
   attachClient(projectId: string, sessionId: string, client: SessionClient): SessionMetadata | null {
     this.syncSessionsFromTmux();
     if (!this.isTmuxAvailable()) {
@@ -1019,6 +1082,8 @@ export class TerminalSessionManager {
       workspaceType: session.workspaceType,
       workspacePath: session.workspacePath,
       branchName: session.branchName,
+      lifecycleState: session.lifecycleState,
+      lifecycleUpdatedAt: new Date(session.lifecycleUpdatedAtMs).toISOString(),
     };
   }
 
@@ -1122,6 +1187,8 @@ export class TerminalSessionManager {
       workspaceType: input.workspaceType,
       workspacePath: input.workspacePath,
       branchName: input.branchName,
+      lifecycleState: DEFAULT_SESSION_LIFECYCLE_STATE,
+      lifecycleUpdatedAt: nowIso,
     });
     this.saveRegistry();
 
@@ -1140,6 +1207,8 @@ export class TerminalSessionManager {
       workspaceType: input.workspaceType,
       workspacePath: input.workspacePath,
       branchName: input.branchName,
+      lifecycleState: DEFAULT_SESSION_LIFECYCLE_STATE,
+      lifecycleUpdatedAtMs: now,
     };
 
     this.sessions.set(key, session);
@@ -1373,6 +1442,7 @@ export class TerminalSessionManager {
 
       const createdAtMs = entryToTimestamp(registryEntry.createdAt);
       const registryLastActiveMs = entryToTimestamp(registryEntry.lastActiveAt);
+      const lifecycleUpdatedAtMs = entryToTimestamp(registryEntry.lifecycleUpdatedAt);
 
       const existing = this.sessions.get(key);
       if (!existing) {
@@ -1391,6 +1461,8 @@ export class TerminalSessionManager {
           workspaceType: registryEntry.workspaceType,
           workspacePath: registryEntry.workspacePath,
           branchName: registryEntry.branchName,
+          lifecycleState: registryEntry.lifecycleState,
+          lifecycleUpdatedAtMs,
         });
         continue;
       }
@@ -1400,17 +1472,27 @@ export class TerminalSessionManager {
       existing.workspaceType = registryEntry.workspaceType;
       existing.workspacePath = registryEntry.workspacePath;
       existing.branchName = registryEntry.branchName;
+      existing.lifecycleState = registryEntry.lifecycleState;
+      existing.lifecycleUpdatedAtMs = lifecycleUpdatedAtMs;
       if (existing.lastActiveAtMs < registryLastActiveMs) {
         existing.lastActiveAtMs = registryLastActiveMs;
       }
 
       const normalizedLastActive = new Date(existing.lastActiveAtMs).toISOString();
       const normalizedCreatedAt = new Date(existing.createdAtMs).toISOString();
-      if (registryEntry.createdAt !== normalizedCreatedAt || registryEntry.lastActiveAt !== normalizedLastActive) {
+      const normalizedLifecycleUpdatedAt = new Date(existing.lifecycleUpdatedAtMs).toISOString();
+      if (
+        registryEntry.createdAt !== normalizedCreatedAt ||
+        registryEntry.lastActiveAt !== normalizedLastActive ||
+        registryEntry.lifecycleUpdatedAt !== normalizedLifecycleUpdatedAt ||
+        registryEntry.lifecycleState !== existing.lifecycleState
+      ) {
         this.registrySessions.set(key, {
           ...registryEntry,
           createdAt: normalizedCreatedAt,
           lastActiveAt: normalizedLastActive,
+          lifecycleState: existing.lifecycleState,
+          lifecycleUpdatedAt: normalizedLifecycleUpdatedAt,
         });
         registryChanged = true;
       }

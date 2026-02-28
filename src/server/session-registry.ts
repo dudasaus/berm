@@ -2,6 +2,12 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
+import {
+  DEFAULT_SESSION_LIFECYCLE_STATE,
+  isSessionLifecycleState,
+  type SessionLifecycleState,
+} from "../shared/session-lifecycle";
+
 export type SessionWorkspaceType = "main" | "worktree";
 
 export interface ProjectRegistryEntry {
@@ -25,12 +31,29 @@ export interface SessionRegistryEntry {
   workspaceType: SessionWorkspaceType;
   workspacePath: string;
   branchName: string | null;
+  lifecycleState: SessionLifecycleState;
+  lifecycleUpdatedAt: string;
+}
+
+interface SessionRegistryFileV5 {
+  version: 5;
+  projects: ProjectRegistryEntry[];
+  sessions: SessionRegistryEntry[];
 }
 
 interface SessionRegistryFileV4 {
   version: 4;
   projects: ProjectRegistryEntry[];
-  sessions: SessionRegistryEntry[];
+  sessions: Array<{
+    projectId: string;
+    sessionId: string;
+    tmuxSessionName: string;
+    createdAt: string;
+    lastActiveAt: string;
+    workspaceType: SessionWorkspaceType;
+    workspacePath: string;
+    branchName: string | null;
+  }>;
 }
 
 interface SessionRegistryFileV3 {
@@ -79,7 +102,7 @@ export interface SessionRegistryData {
   sessions: Map<string, SessionRegistryEntry>;
 }
 
-const REGISTRY_VERSION = 4;
+const REGISTRY_VERSION = 5;
 const DEFAULT_WORKTREE_HOOK_TIMEOUT_MS = 15_000;
 
 export function defaultSessionRegistryPath(): string {
@@ -132,10 +155,10 @@ export function loadSessionRegistry(path: string): SessionRegistryData {
   }
 
   const raw = readFileSync(path, "utf8");
-  let parsed: SessionRegistryFileV4 | SessionRegistryFileV3 | SessionRegistryFileV2;
+  let parsed: SessionRegistryFileV5 | SessionRegistryFileV4 | SessionRegistryFileV3 | SessionRegistryFileV2;
 
   try {
-    parsed = JSON.parse(raw) as SessionRegistryFileV4 | SessionRegistryFileV3 | SessionRegistryFileV2;
+    parsed = JSON.parse(raw) as SessionRegistryFileV5 | SessionRegistryFileV4 | SessionRegistryFileV3 | SessionRegistryFileV2;
   } catch {
     const backupPath = `${path}.bak-${Date.now()}`;
     renameSync(path, backupPath);
@@ -144,7 +167,7 @@ export function loadSessionRegistry(path: string): SessionRegistryData {
     return empty;
   }
 
-  if (parsed.version !== 2 && parsed.version !== 3 && parsed.version !== REGISTRY_VERSION) {
+  if (parsed.version !== 2 && parsed.version !== 3 && parsed.version !== 4 && parsed.version !== REGISTRY_VERSION) {
     const empty = emptyRegistryData();
     saveSessionRegistry(path, empty);
     return empty;
@@ -210,17 +233,27 @@ export function loadSessionRegistry(path: string): SessionRegistryData {
     const workspaceType: SessionWorkspaceType = sessionRecord.workspaceType === "worktree" ? "worktree" : "main";
     const workspacePath = normalizeNonEmptyString(sessionRecord.workspacePath) ?? owningProject.path;
     const branchName = normalizeNonEmptyString(sessionRecord.branchName);
+    const lifecycleState = isSessionLifecycleState(sessionRecord.lifecycleState)
+      ? sessionRecord.lifecycleState
+      : DEFAULT_SESSION_LIFECYCLE_STATE;
 
     const now = Date.now();
+    const createdAt = normalizeDate(session.createdAt, now);
+    const lifecycleUpdatedAt = normalizeDate(
+      typeof sessionRecord.lifecycleUpdatedAt === "string" ? sessionRecord.lifecycleUpdatedAt : undefined,
+      Date.parse(createdAt),
+    );
     sessions.set(sessionRegistryKey(projectId, sessionId), {
       projectId,
       sessionId,
       tmuxSessionName,
-      createdAt: normalizeDate(session.createdAt, now),
+      createdAt,
       lastActiveAt: normalizeDate(session.lastActiveAt, now),
       workspaceType,
       workspacePath,
       branchName: workspaceType === "worktree" ? branchName : null,
+      lifecycleState,
+      lifecycleUpdatedAt,
     });
   }
 
@@ -238,7 +271,7 @@ export function saveSessionRegistry(path: string, data: SessionRegistryData): vo
     mkdirSync(directory, { recursive: true });
   }
 
-  const payload: SessionRegistryFileV4 = {
+  const payload: SessionRegistryFileV5 = {
     version: REGISTRY_VERSION,
     projects: [...data.projects.values()].sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id)),
     sessions: [...data.sessions.values()].sort((a, b) => {

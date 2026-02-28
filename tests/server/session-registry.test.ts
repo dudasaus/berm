@@ -42,6 +42,8 @@ function makeSession(projectId: string, sessionId: string): SessionRegistryEntry
     workspaceType: "main",
     workspacePath: `/tmp/${projectId}`,
     branchName: null,
+    lifecycleState: "planning",
+    lifecycleUpdatedAt: now,
   };
 }
 
@@ -87,7 +89,7 @@ describe("session registry", () => {
     }
   });
 
-  test("migrates v2 registry records to v4 defaults", async () => {
+  test("migrates v2 registry records to v5 defaults", async () => {
     const path = uniqueRegistryPath("migrate");
     const directory = dirname(path);
     mkdirSync(directory, { recursive: true });
@@ -127,9 +129,11 @@ describe("session registry", () => {
       expect(session?.workspaceType).toBe("main");
       expect(session?.workspacePath).toBe("/tmp/legacy");
       expect(session?.branchName).toBeNull();
+      expect(session?.lifecycleState).toBe("planning");
+      expect(typeof session?.lifecycleUpdatedAt).toBe("string");
 
       const persisted = JSON.parse(await Bun.file(path).text()) as { version: number };
-      expect(persisted.version).toBe(4);
+      expect(persisted.version).toBe(5);
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }

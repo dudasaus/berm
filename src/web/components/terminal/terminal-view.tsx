@@ -1,14 +1,22 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  AlertTriangle,
+  ClipboardCheck,
   Command as CommandIcon,
   ChevronDown,
   ChevronUp,
   Eye,
   EyeOff,
+  Flag,
   FolderOpen,
+  GitMerge,
+  GitPullRequest,
+  Hammer,
+  PauseCircle,
   Plus,
   RefreshCw,
+  Search,
   Settings2,
   Trash2,
 } from "lucide-react";
@@ -39,6 +47,11 @@ import {
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "../ui/resizable";
 import { Separator } from "../ui/separator";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../ui/tooltip";
+import {
+  SESSION_LIFECYCLE_LABELS,
+  SESSION_LIFECYCLE_STATES,
+  type SessionLifecycleState,
+} from "../../../shared/session-lifecycle";
 import {
   TERMINAL_ACTIONS,
   type TerminalActionConfirmation,
@@ -95,6 +108,8 @@ type SessionMetadata = {
   workspaceType: "main" | "worktree";
   workspacePath: string;
   branchName: string | null;
+  lifecycleState: SessionLifecycleState;
+  lifecycleUpdatedAt: string;
 };
 
 type WorktreeHookExecutionDetails = {
@@ -351,6 +366,32 @@ async function deleteSession(request: { projectId: string; sessionId: string }) 
   return true;
 }
 
+async function updateSessionLifecycle(request: {
+  projectId: string;
+  sessionId: string;
+  lifecycleState: SessionLifecycleState;
+}) {
+  const response = await fetch(
+    `/api/projects/${encodeURIComponent(request.projectId)}/sessions/${encodeURIComponent(request.sessionId)}`,
+    {
+      method: "PATCH",
+      headers: {
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        lifecycleState: request.lifecycleState,
+      }),
+    },
+  );
+
+  const payload = (await response.json().catch(() => ({}))) as SessionMetadata | { error?: string };
+  if (!response.ok) {
+    throw new Error("error" in payload && payload.error ? payload.error : `update session lifecycle failed with ${response.status}`);
+  }
+
+  return payload as SessionMetadata;
+}
+
 async function deleteProject(projectId: string) {
   const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}`, {
     method: "DELETE",
@@ -378,6 +419,58 @@ function badgeVariantForConnection(state: TerminalConnectionState) {
   }
 
   return "outline" as const;
+}
+
+function lifecycleActionId(state: SessionLifecycleState): TerminalActionId {
+  return `session.lifecycle.${state}`;
+}
+
+function badgeVariantForLifecycle(state: SessionLifecycleState) {
+  switch (state) {
+    case "planning":
+    case "exploration":
+      return "outline" as const;
+    case "implementing":
+    case "in_review":
+      return "secondary" as const;
+    case "submitted_pr":
+      return "warning" as const;
+    case "merged":
+      return "success" as const;
+    case "blocked":
+      return "warning" as const;
+    case "paused":
+      return "outline" as const;
+    default: {
+      const neverState: never = state;
+      throw new Error(`Unknown lifecycle state '${neverState as string}'`);
+    }
+  }
+}
+
+function formatRelativeDuration(isoTime: string, nowMs: number): string {
+  const parsedMs = Date.parse(isoTime);
+  if (Number.isNaN(parsedMs)) {
+    return "unknown";
+  }
+
+  const deltaMs = Math.max(0, nowMs - parsedMs);
+  const minutes = Math.floor(deltaMs / 60_000);
+  if (minutes < 1) {
+    return "<1m";
+  }
+
+  if (minutes < 60) {
+    return `${minutes}m`;
+  }
+
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) {
+    return `${hours}h`;
+  }
+
+  const days = Math.floor(hours / 24);
+  return `${days}d`;
 }
 
 function readStoredProjectId(): string | null {
@@ -508,6 +601,22 @@ function renderActionIcon(icon: TerminalActionIcon) {
       return <Trash2 className="h-4 w-4" />;
     case "refresh":
       return <RefreshCw className="h-4 w-4" />;
+    case "flag":
+      return <Flag className="h-4 w-4" />;
+    case "search":
+      return <Search className="h-4 w-4" />;
+    case "hammer":
+      return <Hammer className="h-4 w-4" />;
+    case "review":
+      return <ClipboardCheck className="h-4 w-4" />;
+    case "pr":
+      return <GitPullRequest className="h-4 w-4" />;
+    case "merged":
+      return <GitMerge className="h-4 w-4" />;
+    case "blocked":
+      return <AlertTriangle className="h-4 w-4" />;
+    case "paused":
+      return <PauseCircle className="h-4 w-4" />;
     case "eye-open":
       return <Eye className="h-4 w-4" />;
     case "eye-closed":
@@ -546,6 +655,7 @@ export function TerminalView() {
     return window.matchMedia(`(max-width: ${STACK_LAYOUT_BREAKPOINT_PX}px)`).matches;
   });
   const [isCommandOpen, setIsCommandOpen] = useState(false);
+  const [nowMs, setNowMs] = useState(() => Date.now());
   const [pendingActionConfirmation, setPendingActionConfirmation] = useState<PendingActionConfirmation | null>(null);
   const commandHotkeyLabel = useMemo(() => {
     if (typeof navigator === "undefined") {
@@ -621,6 +731,16 @@ export function TerminalView() {
     mediaQuery.addEventListener("change", handleChange);
     return () => {
       mediaQuery.removeEventListener("change", handleChange);
+    };
+  }, []);
+
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      setNowMs(Date.now());
+    }, 30_000);
+
+    return () => {
+      window.clearInterval(interval);
     };
   }, []);
 
@@ -848,6 +968,17 @@ export function TerminalView() {
       }
 
       void queryClient.invalidateQueries({ queryKey: ["sessions", request.projectId] });
+    },
+    onError: (error) => {
+      toast.error(error instanceof Error ? error.message : String(error));
+    },
+  });
+
+  const updateSessionLifecycleMutation = useMutation({
+    mutationFn: updateSessionLifecycle,
+    onSuccess: (session) => {
+      toast.success(`Session ${session.id}: ${SESSION_LIFECYCLE_LABELS[session.lifecycleState]}`);
+      void queryClient.invalidateQueries({ queryKey: ["sessions", session.projectId] });
     },
     onError: (error) => {
       toast.error(error instanceof Error ? error.message : String(error));
@@ -1121,6 +1252,14 @@ export function TerminalView() {
     deleteSessionMutation.mutate(request);
   };
 
+  const setSessionLifecycleStateById = (request: {
+    projectId: string;
+    sessionId: string;
+    lifecycleState: SessionLifecycleState;
+  }) => {
+    updateSessionLifecycleMutation.mutate(request);
+  };
+
   const handleWorktreeHookDecision = (decision: "abort" | "continue") => {
     if (!worktreeHookFailure) {
       return;
@@ -1177,12 +1316,14 @@ export function TerminalView() {
       selectedProjectName: selectedProject?.name ?? null,
       selectedSessionId,
       selectedSessionName: selectedSession?.id ?? null,
+      selectedSessionLifecycleState: selectedSession?.lifecycleState ?? null,
       isHeaderVisible,
       pending: {
         pickProject: selectProjectMutation.isPending,
         createSession: createSessionMutation.isPending,
         deleteProject: deleteProjectMutation.isPending,
         deleteSession: deleteSessionMutation.isPending,
+        updateSessionLifecycle: updateSessionLifecycleMutation.isPending,
       },
     }),
     [
@@ -1195,6 +1336,7 @@ export function TerminalView() {
       selectedSession,
       selectedSessionId,
       selectProjectMutation.isPending,
+      updateSessionLifecycleMutation.isPending,
     ],
   );
 
@@ -1218,6 +1360,7 @@ export function TerminalView() {
     deleteProject: deleteProjectById,
     deleteSession: deleteSessionById,
     reconnectSession: reconnectSelectedSession,
+    setSessionLifecycleState: setSessionLifecycleStateById,
     hideHeader: () => {
       setIsHeaderVisible(false);
     },
@@ -1546,6 +1689,7 @@ export function TerminalView() {
                             const position = sessionOrder.indexOf(session.id);
                             const canMoveUp = position > 0;
                             const canMoveDown = position !== -1 && position < sessionOrder.length - 1;
+                            const lifecycleDuration = formatRelativeDuration(session.lifecycleUpdatedAt, nowMs);
 
                             return (
                               <div
@@ -1564,7 +1708,13 @@ export function TerminalView() {
                                     <p className="font-mono text-[11px] text-muted-foreground">
                                       active {new Date(session.lastActiveAt).toLocaleTimeString()} · clients {session.attachedClients}
                                     </p>
-                                    <div className="mt-1 flex items-center gap-1">
+                                    <div className="mt-1 flex flex-wrap items-center gap-1">
+                                      <Badge
+                                        variant={badgeVariantForLifecycle(session.lifecycleState)}
+                                        className="font-mono text-[10px] uppercase tracking-wide"
+                                      >
+                                        {SESSION_LIFECYCLE_LABELS[session.lifecycleState]} · {lifecycleDuration}
+                                      </Badge>
                                       <Badge
                                         variant={session.workspaceType === "worktree" ? "secondary" : "outline"}
                                         className="font-mono text-[10px] uppercase tracking-wide"
@@ -1613,6 +1763,42 @@ export function TerminalView() {
                                     </Tooltip>
                                   </div>
 
+                                  <DropdownMenu>
+                                    <DropdownMenuTrigger asChild>
+                                      <Button
+                                        size="sm"
+                                        variant="outline"
+                                        className="h-7 px-2 font-mono text-[10px]"
+                                        disabled={updateSessionLifecycleMutation.isPending}
+                                      >
+                                        {SESSION_LIFECYCLE_LABELS[session.lifecycleState]}
+                                      </Button>
+                                    </DropdownMenuTrigger>
+                                    <DropdownMenuContent align="end" className="w-48">
+                                      <DropdownMenuLabel>Set Session State</DropdownMenuLabel>
+                                      <DropdownMenuSeparator />
+                                      {SESSION_LIFECYCLE_STATES.map((stateOption) => (
+                                        <DropdownMenuItem
+                                          key={stateOption}
+                                          onSelect={() => {
+                                            runAction(
+                                              lifecycleActionId(stateOption),
+                                              {
+                                                source: "row",
+                                                projectId: selectedProjectId ?? undefined,
+                                                sessionId: session.id,
+                                              },
+                                              { suppressUnavailableToast: true },
+                                            );
+                                          }}
+                                          disabled={updateSessionLifecycleMutation.isPending || session.lifecycleState === stateOption}
+                                        >
+                                          {SESSION_LIFECYCLE_LABELS[stateOption]}
+                                        </DropdownMenuItem>
+                                      ))}
+                                    </DropdownMenuContent>
+                                  </DropdownMenu>
+
                                   <Tooltip>
                                     <TooltipTrigger asChild>
                                       <Button
@@ -1654,6 +1840,13 @@ export function TerminalView() {
                     <Separator />
 
                     <div className="grid gap-2 font-mono text-xs text-muted-foreground">
+                      <div className="flex justify-between">
+                        <span>session state</span>
+                        <span>
+                          {SESSION_LIFECYCLE_LABELS[selectedSession.lifecycleState]} ·{" "}
+                          {formatRelativeDuration(selectedSession.lifecycleUpdatedAt, nowMs)}
+                        </span>
+                      </div>
                       <div className="flex justify-between">
                         <span>attached clients</span>
                         <span>{selectedSession.attachedClients}</span>

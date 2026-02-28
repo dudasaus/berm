@@ -9,6 +9,7 @@ import {
   type SessionMetadata,
   TerminalSessionManager,
   type UpdateProjectRequest,
+  type UpdateSessionLifecycleRequest,
   isSessionManagerError,
   type SessionClient,
 } from "./terminal-session";
@@ -28,6 +29,7 @@ export interface SessionManagerLike {
   listSessions(projectId: string): SessionMetadata[];
   createSession(projectId: string, request?: CreateSessionRequest): CreateSessionResult;
   resolveWorktreeHookDecision(projectId: string, request: ResolveWorktreeHookDecisionRequest): ResolveWorktreeHookDecisionResult;
+  updateSessionLifecycleState(projectId: string, sessionId: string, input: UpdateSessionLifecycleRequest): SessionMetadata;
   deleteSession(projectId: string, sessionId: string): boolean;
   hasSession(projectId: string, sessionId: string): boolean;
   attachClient(projectId: string, sessionId: string, client: SessionClient): SessionMetadata | null;
@@ -256,6 +258,19 @@ export function createServerConfig(
       "/api/projects/:projectId/sessions/:id": {
         GET: (req: Bun.BunRequest<"/api/projects/:projectId/sessions/:id">) =>
           buildSessionResponse(manager, req.params.projectId, req.params.id),
+        PATCH: async (req: Bun.BunRequest<"/api/projects/:projectId/sessions/:id">) => {
+          try {
+            const body = (await req.json().catch(() => ({}))) as {
+              lifecycleState?: unknown;
+            };
+            const session = manager.updateSessionLifecycleState(req.params.projectId, req.params.id, {
+              lifecycleState: body.lifecycleState as UpdateSessionLifecycleRequest["lifecycleState"],
+            });
+            return Response.json(session);
+          } catch (error) {
+            return errorResponse(error);
+          }
+        },
         DELETE: (req: Bun.BunRequest<"/api/projects/:projectId/sessions/:id">) => {
           try {
             const deleted = manager.deleteSession(req.params.projectId, req.params.id);

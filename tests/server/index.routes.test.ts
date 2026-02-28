@@ -12,6 +12,7 @@ import {
   type SessionClient,
   type SessionMetadata,
   type UpdateProjectRequest,
+  type UpdateSessionLifecycleRequest,
 } from "../../src/server/terminal-session";
 import { parseServerMessage } from "../../src/shared/protocol";
 
@@ -148,6 +149,8 @@ class FakeSessionManager implements SessionManagerLike {
       workspaceType: mode,
       workspacePath: mode === "worktree" ? `/tmp/worktree/${sessionId}` : project.path,
       branchName: mode === "worktree" ? sessionId : null,
+      lifecycleState: "planning",
+      lifecycleUpdatedAt: nowIso(),
     };
     this.sessions.set(sessionKey(projectId, sessionId), metadata);
     const hook =
@@ -189,6 +192,22 @@ class FakeSessionManager implements SessionManagerLike {
     const session = this.createSession(projectId, { mode: "worktree", branchName: pending.branchName }).session;
     this.pendingHookFailures.delete(request.decisionToken);
     return { action: "continue", session };
+  }
+
+  updateSessionLifecycleState(projectId: string, sessionId: string, input: UpdateSessionLifecycleRequest): SessionMetadata {
+    const key = sessionKey(projectId, sessionId);
+    const session = this.sessions.get(key);
+    if (!session) {
+      throw new Error("session missing");
+    }
+
+    const updated: SessionMetadata = {
+      ...session,
+      lifecycleState: input.lifecycleState,
+      lifecycleUpdatedAt: nowIso(),
+    };
+    this.sessions.set(key, updated);
+    return updated;
   }
 
   attachClient(projectId: string, sessionId: string, _client: SessionClient): SessionMetadata | null {
@@ -336,6 +355,18 @@ describe("server config routes and websocket", () => {
       GET: (req: Bun.BunRequest<"/api/projects/:projectId/sessions/:id">) => Response;
     }).GET(makeRequest<"/api/projects/:projectId/sessions/:id">({ projectId: "p1", id: "main-1" }));
     expect(getSessionResponse.status).toBe(200);
+
+    const patchSessionResponse = await (routes["/api/projects/:projectId/sessions/:id"] as {
+      PATCH: (req: Bun.BunRequest<"/api/projects/:projectId/sessions/:id">) => Promise<Response>;
+    }).PATCH(
+      makeRequest<"/api/projects/:projectId/sessions/:id">(
+        { projectId: "p1", id: "main-1" },
+        { lifecycleState: "in_review" },
+      ),
+    );
+    expect(patchSessionResponse.status).toBe(200);
+    const patchSessionPayload = (await patchSessionResponse.json()) as SessionMetadata;
+    expect(patchSessionPayload.lifecycleState).toBe("in_review");
 
     const deleteSessionResponse = (routes["/api/projects/:projectId/sessions/:id"] as {
       DELETE: (req: Bun.BunRequest<"/api/projects/:projectId/sessions/:id">) => Response;

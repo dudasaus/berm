@@ -21,6 +21,7 @@ A project maps to a real directory path, and each project can contain many termi
 - Terminal backend: `TerminalSessionManager` in `src/server/terminal-session.ts`
 - Registry persistence: JSON file managed by `src/server/session-registry.ts`
 - Protocol contract: `src/shared/protocol.ts`
+- Session lifecycle contract: `src/shared/session-lifecycle.ts`
 
 ## Backend Components
 
@@ -42,7 +43,7 @@ File: `src/server/terminal-session.ts`
 Responsibilities:
 
 - Project CRUD surface used by API layer (`listProjects`, `selectProject`, `updateProject`, `deleteProject`)
-- Project-scoped session lifecycle (`createSession`, `listSessions`, `deleteSession`)
+- Project-scoped session lifecycle (`createSession`, `listSessions`, `updateSessionLifecycleState`, `deleteSession`)
 - WebSocket client attach/detach and message handling
 - tmux reconciliation and availability/error management
 - git worktree creation/removal for worktree-mode sessions
@@ -66,7 +67,7 @@ Stored in default path:
 
 - `~/.command-center/sessions.json`
 
-Current schema (version 4):
+Current schema (version 5):
 
 - `projects[]`
   - includes `worktreeEnabled`, `worktreeParentPath`, `worktreeHookCommand`, `worktreeHookTimeoutMs`
@@ -75,13 +76,15 @@ Current schema (version 4):
     - `workspaceType` (`main` or `worktree`)
     - `workspacePath`
     - `branchName` (for worktree sessions)
+    - `lifecycleState` (`planning`, `exploration`, `implementing`, `in_review`, `submitted_pr`, `merged`, `blocked`, `paused`)
+    - `lifecycleUpdatedAt` (ISO timestamp of last lifecycle change)
 
 Properties:
 
 - Atomic writes via temp file + rename
 - Auto-create file/directory if missing
 - Invalid JSON backup behavior (`.bak-<timestamp>`)
-- v2/v3 registry data is loaded with defaults for new fields and then saved in v4 format
+- v2/v3/v4 registry data is loaded with defaults for new fields and then saved in v5 format
 
 ## Project Model
 
@@ -128,6 +131,7 @@ Validation rules for selection:
   - Resolve failed hook with `{ decisionToken, decision }`
   - `decision` is `"abort"` (cleanup worktree+branch) or `"continue"` (create tmux session anyway)
 - `GET /api/projects/:projectId/sessions/:id`
+- `PATCH /api/projects/:projectId/sessions/:id` with `{ lifecycleState }`
 - `DELETE /api/projects/:projectId/sessions/:id`
 
 ### WebSocket
@@ -167,7 +171,10 @@ Responsibilities:
   - new session (auto/custom)
   - delete session
   - reconnect
+  - set session lifecycle state (`planning`, `exploration`, `implementing`, `in review`, `submitted PR`, `merged`, `blocked`, `paused`)
   - hide header / show header
+- Renders session lifecycle badges and "time in state" in the session list
+- Supports per-session lifecycle updates from both command palette and session-row dropdown menu
 - Persists header visibility preference in browser `localStorage` across sessions
 - Uses a shared confirmation dialog for destructive actions (delete session/project) instead of `window.confirm`
 - Includes a modal for per-project worktree settings

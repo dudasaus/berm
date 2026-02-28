@@ -1,3 +1,11 @@
+import {
+  SESSION_LIFECYCLE_LABELS,
+  SESSION_LIFECYCLE_STATES,
+  type SessionLifecycleState,
+} from "../../../shared/session-lifecycle";
+
+type SessionLifecycleActionId = `session.lifecycle.${SessionLifecycleState}`;
+
 export type TerminalActionId =
   | "project.new.pick"
   | "project.delete.current"
@@ -5,11 +13,26 @@ export type TerminalActionId =
   | "session.new.custom"
   | "session.delete.current"
   | "session.reconnect"
+  | SessionLifecycleActionId
   | "view.hide-header"
   | "view.show-header";
 
 export type TerminalActionGroup = "Project" | "Session" | "View";
-export type TerminalActionIcon = "folder" | "plus" | "trash" | "refresh" | "eye-open" | "eye-closed";
+export type TerminalActionIcon =
+  | "folder"
+  | "plus"
+  | "trash"
+  | "refresh"
+  | "flag"
+  | "search"
+  | "hammer"
+  | "review"
+  | "pr"
+  | "merged"
+  | "blocked"
+  | "paused"
+  | "eye-open"
+  | "eye-closed";
 export type TerminalActionSource = "palette" | "button" | "dropdown" | "row" | "fallback";
 
 export interface TerminalActionInvocation {
@@ -36,12 +59,14 @@ export interface TerminalActionContext {
   selectedProjectName: string | null;
   selectedSessionId: string | null;
   selectedSessionName: string | null;
+  selectedSessionLifecycleState: SessionLifecycleState | null;
   isHeaderVisible: boolean;
   pending: {
     pickProject: boolean;
     createSession: boolean;
     deleteSession: boolean;
     deleteProject: boolean;
+    updateSessionLifecycle: boolean;
   };
 }
 
@@ -52,6 +77,11 @@ export interface TerminalActionHandlers {
   deleteProject: (projectId: string) => void;
   deleteSession: (request: { projectId: string; sessionId: string }) => void;
   reconnectSession: () => void;
+  setSessionLifecycleState: (request: {
+    projectId: string;
+    sessionId: string;
+    lifecycleState: SessionLifecycleState;
+  }) => void;
   hideHeader: () => void;
   showHeader: () => void;
 }
@@ -80,61 +110,78 @@ function resolveSessionId(context: TerminalActionContext, invocation: TerminalAc
   return invocation.sessionId ?? context.selectedSessionId ?? null;
 }
 
+function lifecycleActionId(state: SessionLifecycleState): SessionLifecycleActionId {
+  return `session.lifecycle.${state}`;
+}
+
+function lifecycleActionIcon(state: SessionLifecycleState): TerminalActionIcon {
+  switch (state) {
+    case "planning":
+      return "flag";
+    case "exploration":
+      return "search";
+    case "implementing":
+      return "hammer";
+    case "in_review":
+      return "review";
+    case "submitted_pr":
+      return "pr";
+    case "merged":
+      return "merged";
+    case "blocked":
+      return "blocked";
+    case "paused":
+      return "paused";
+    default: {
+      const neverState: never = state;
+      throw new Error(`Unknown lifecycle state '${neverState as string}'`);
+    }
+  }
+}
+
+const SESSION_LIFECYCLE_ACTIONS: TerminalActionDefinition[] = SESSION_LIFECYCLE_STATES.map((state) => ({
+  id: lifecycleActionId(state),
+  label: `Set State: ${SESSION_LIFECYCLE_LABELS[state]}`,
+  description: `Mark selected session as ${SESSION_LIFECYCLE_LABELS[state].toLowerCase()}.`,
+  group: "Session",
+  icon: lifecycleActionIcon(state),
+  keywords: ["session", "state", "lifecycle", state, SESSION_LIFECYCLE_LABELS[state].toLowerCase()],
+  getAvailability: (context, invocation) => {
+    const projectId = resolveProjectId(context, invocation);
+    if (!projectId) {
+      return { enabled: false, disabledReason: "Select a project first" };
+    }
+
+    if (!resolveSessionId(context, invocation)) {
+      return { enabled: false, disabledReason: "Select a session first" };
+    }
+
+    if (context.pending.updateSessionLifecycle) {
+      return { enabled: false, disabledReason: "Session state update in progress" };
+    }
+
+    if (
+      !invocation.sessionId &&
+      !invocation.projectId &&
+      context.selectedSessionLifecycleState === state
+    ) {
+      return { enabled: false, disabledReason: `Already ${SESSION_LIFECYCLE_LABELS[state].toLowerCase()}` };
+    }
+
+    return { enabled: true };
+  },
+  run: (context, handlers, invocation) => {
+    const projectId = resolveProjectId(context, invocation);
+    const sessionId = resolveSessionId(context, invocation);
+    if (!projectId || !sessionId) {
+      return;
+    }
+
+    handlers.setSessionLifecycleState({ projectId, sessionId, lifecycleState: state });
+  },
+}));
+
 export const TERMINAL_ACTIONS: TerminalActionDefinition[] = [
-  {
-    id: "project.new.pick",
-    label: "New Project",
-    description: "Pick a directory and select it as a project.",
-    group: "Project",
-    icon: "folder",
-    keywords: ["project", "new", "pick", "directory", "folder"],
-    getAvailability: (context) => {
-      if (context.pending.pickProject) {
-        return { enabled: false, disabledReason: "Project picker is already open" };
-      }
-      return { enabled: true };
-    },
-    run: (_context, handlers) => {
-      void handlers.pickProject();
-    },
-  },
-  {
-    id: "project.delete.current",
-    label: "Delete Project",
-    description: "Delete selected project and all project sessions.",
-    group: "Project",
-    icon: "trash",
-    keywords: ["project", "delete", "remove"],
-    getAvailability: (context, invocation) => {
-      if (!resolveProjectId(context, invocation)) {
-        return { enabled: false, disabledReason: "Select a project first" };
-      }
-      if (context.pending.deleteProject) {
-        return { enabled: false, disabledReason: "Project deletion already in progress" };
-      }
-      return { enabled: true };
-    },
-    getConfirmation: (context, invocation) => {
-      const projectId = resolveProjectId(context, invocation);
-      if (!projectId) {
-        return null;
-      }
-      const projectName = context.selectedProjectName ?? projectId;
-      return {
-        title: "Delete project?",
-        description: `Delete project '${projectName}' and all of its sessions? This will kill all tmux sessions in that project.`,
-        confirmLabel: "Delete project",
-        tone: "destructive",
-      };
-    },
-    run: (context, handlers, invocation) => {
-      const projectId = resolveProjectId(context, invocation);
-      if (!projectId) {
-        return;
-      }
-      handlers.deleteProject(projectId);
-    },
-  },
   {
     id: "session.new.auto",
     label: "New Session (Auto)",
@@ -232,6 +279,61 @@ export const TERMINAL_ACTIONS: TerminalActionDefinition[] = [
     },
     run: (_context, handlers) => {
       handlers.reconnectSession();
+    },
+  },
+  ...SESSION_LIFECYCLE_ACTIONS,
+  {
+    id: "project.new.pick",
+    label: "New Project",
+    description: "Pick a directory and select it as a project.",
+    group: "Project",
+    icon: "folder",
+    keywords: ["project", "new", "pick", "directory", "folder"],
+    getAvailability: (context) => {
+      if (context.pending.pickProject) {
+        return { enabled: false, disabledReason: "Project picker is already open" };
+      }
+      return { enabled: true };
+    },
+    run: (_context, handlers) => {
+      void handlers.pickProject();
+    },
+  },
+  {
+    id: "project.delete.current",
+    label: "Delete Project",
+    description: "Delete selected project and all project sessions.",
+    group: "Project",
+    icon: "trash",
+    keywords: ["project", "delete", "remove"],
+    getAvailability: (context, invocation) => {
+      if (!resolveProjectId(context, invocation)) {
+        return { enabled: false, disabledReason: "Select a project first" };
+      }
+      if (context.pending.deleteProject) {
+        return { enabled: false, disabledReason: "Project deletion already in progress" };
+      }
+      return { enabled: true };
+    },
+    getConfirmation: (context, invocation) => {
+      const projectId = resolveProjectId(context, invocation);
+      if (!projectId) {
+        return null;
+      }
+      const projectName = context.selectedProjectName ?? projectId;
+      return {
+        title: "Delete project?",
+        description: `Delete project '${projectName}' and all of its sessions? This will kill all tmux sessions in that project.`,
+        confirmLabel: "Delete project",
+        tone: "destructive",
+      };
+    },
+    run: (context, handlers, invocation) => {
+      const projectId = resolveProjectId(context, invocation);
+      if (!projectId) {
+        return;
+      }
+      handlers.deleteProject(projectId);
     },
   },
   {

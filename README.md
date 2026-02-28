@@ -14,6 +14,7 @@ Web terminal app powered by Bun PTY + zsh on the backend and TanStack React + xt
 - If a hook fails, the UI shows hook stdout/stderr and lets you abort cleanup or continue session creation.
 - Hook toasts include a "View output" action when stdout/stderr is present.
 - Worktree sessions are persisted and cleaned up (worktree + branch) when deleted.
+- Sessions have a persisted lifecycle state (`planning`, `exploration`, `implementing`, `in_review`, `submitted_pr`, `merged`, `blocked`, `paused`) that can be changed from the command palette or session list.
 
 ## Docs
 
