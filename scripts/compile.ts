@@ -9,9 +9,10 @@ const entrypoint = resolve(scriptDir, "../src/server/index.ts");
 
 const result = await Bun.build({
   entrypoints: [entrypoint],
-  outfile: outputPath,
+  compile: {
+    outfile: outputPath,
+  },
   target: "bun",
-  compile: true,
   minify: true,
   plugins: [tailwindPlugin],
 });
