@@ -47,7 +47,6 @@ interface CreateServerOptions {
 
 export interface ServerConfig {
   routes: Record<string, unknown>;
-  fetch: (req: Request, serverRef: Pick<Bun.Server<WebSocketData>, "upgrade">) => Response | undefined;
   websocket: {
     data: WebSocketData;
     open: (ws: Bun.ServerWebSocket<WebSocketData>) => void;
@@ -284,40 +283,36 @@ export function createServerConfig(
           }
         },
       },
-    },
-    fetch(req: Request, serverRef: Pick<Bun.Server<WebSocketData>, "upgrade">) {
-      const url = new URL(req.url);
-      if (url.pathname !== "/ws/terminal") {
-        return new Response("Not Found", { status: 404 });
-      }
+      "/ws/terminal": (req: Request, serverRef: Pick<Bun.Server<WebSocketData>, "upgrade">) => {
+        const url = new URL(req.url);
+        const projectId = url.searchParams.get("projectId")?.trim();
+        if (!projectId) {
+          return Response.json({ error: "projectId query parameter is required" }, { status: 400 });
+        }
 
-      const projectId = url.searchParams.get("projectId")?.trim();
-      if (!projectId) {
-        return Response.json({ error: "projectId query parameter is required" }, { status: 400 });
-      }
+        const sessionId = url.searchParams.get("sessionId")?.trim();
+        if (!sessionId) {
+          return Response.json({ error: "sessionId query parameter is required" }, { status: 400 });
+        }
 
-      const sessionId = url.searchParams.get("sessionId")?.trim();
-      if (!sessionId) {
-        return Response.json({ error: "sessionId query parameter is required" }, { status: 400 });
-      }
+        if (!manager.hasSession(projectId, sessionId)) {
+          return Response.json({ error: "Session not found" }, { status: 404 });
+        }
 
-      if (!manager.hasSession(projectId, sessionId)) {
-        return Response.json({ error: "Session not found" }, { status: 404 });
-      }
+        const upgraded = serverRef.upgrade(req, {
+          data: {
+            projectId,
+            sessionId,
+            clientId: crypto.randomUUID(),
+          },
+        });
 
-      const upgraded = serverRef.upgrade(req, {
-        data: {
-          projectId,
-          sessionId,
-          clientId: crypto.randomUUID(),
-        },
-      });
+        if (!upgraded) {
+          return Response.json({ error: "WebSocket upgrade failed" }, { status: 400 });
+        }
 
-      if (!upgraded) {
-        return Response.json({ error: "WebSocket upgrade failed" }, { status: 400 });
-      }
-
-      return undefined;
+        return undefined;
+      },
     },
     websocket: {
       data: {} as WebSocketData,
@@ -355,12 +350,9 @@ export function createServer(options: number | CreateServerOptions = {}) {
   const openProjectPicker = normalized.pickProjectDirectory ?? pickProjectDirectory;
   const config = createServerConfig(manager, openProjectPicker);
 
-  const server = Bun.serve<WebSocketData>({
+  const serverOptions = {
     port,
-    routes: config.routes as Bun.ServeOptions<WebSocketData>["routes"],
-    fetch(req, serverRef) {
-      return config.fetch(req, serverRef);
-    },
+    routes: config.routes,
     websocket: {
       data: config.websocket.data,
       open(ws) {
@@ -373,7 +365,9 @@ export function createServer(options: number | CreateServerOptions = {}) {
         config.websocket.close(ws);
       },
     },
-  });
+  } as Bun.Serve.Options<WebSocketData, string>;
+
+  const server = Bun.serve<WebSocketData, string>(serverOptions);
 
   return {
     server,

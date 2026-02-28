@@ -393,8 +393,13 @@ describe("server config routes and websocket", () => {
     const manager = new FakeSessionManager();
     manager.createSession("p1", { mode: "main", name: "live" });
     const config = createServerConfig(manager);
+    const routes = config.routes as Record<string, unknown>;
+    const wsRoute = routes["/ws/terminal"] as (
+      req: Request,
+      server: { upgrade: (req: Request, data?: { data: unknown }) => boolean },
+    ) => Response | undefined;
 
-    const noParamsResponse = config.fetch(new Request("http://localhost/ws/terminal"), {
+    const noParamsResponse = wsRoute(new Request("http://localhost/ws/terminal"), {
       upgrade: () => true,
     });
     if (!noParamsResponse) {
@@ -402,7 +407,7 @@ describe("server config routes and websocket", () => {
     }
     expect(noParamsResponse.status).toBe(400);
 
-    const missingSessionResponse = config.fetch(
+    const missingSessionResponse = wsRoute(
       new Request("http://localhost/ws/terminal?projectId=p1"),
       {
         upgrade: () => true,
@@ -413,7 +418,7 @@ describe("server config routes and websocket", () => {
     }
     expect(missingSessionResponse.status).toBe(400);
 
-    const unknownSessionResponse = config.fetch(
+    const unknownSessionResponse = wsRoute(
       new Request("http://localhost/ws/terminal?projectId=p1&sessionId=missing"),
       {
         upgrade: () => true,
@@ -425,10 +430,13 @@ describe("server config routes and websocket", () => {
     expect(unknownSessionResponse.status).toBe(404);
 
     let upgradedData: unknown = null;
-    const upgradedResponse = config.fetch(
+    const upgradedResponse = wsRoute(
       new Request("http://localhost/ws/terminal?projectId=p1&sessionId=live"),
       {
-        upgrade: (_req: Request, data: { data: unknown }) => {
+        upgrade: (_req: Request, data?: { data: unknown }) => {
+          if (!data) {
+            return false;
+          }
           upgradedData = data;
           return true;
         },
@@ -437,7 +445,7 @@ describe("server config routes and websocket", () => {
     expect(upgradedResponse).toBeUndefined();
     expect(upgradedData).not.toBeNull();
 
-    const upgradeFailedResponse = config.fetch(
+    const upgradeFailedResponse = wsRoute(
       new Request("http://localhost/ws/terminal?projectId=p1&sessionId=live"),
       {
         upgrade: () => false,
