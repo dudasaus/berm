@@ -25,6 +25,7 @@ import {
   CommandSeparator,
   CommandShortcut,
 } from "../ui/command";
+import { ConfirmDialog } from "../ui/confirm-dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -37,6 +38,15 @@ import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "../ui/resi
 import { Separator } from "../ui/separator";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../ui/tooltip";
 import {
+  TERMINAL_ACTIONS,
+  type TerminalActionConfirmation,
+  type TerminalActionContext,
+  type TerminalActionGroup,
+  type TerminalActionId,
+  type TerminalActionIcon,
+  type TerminalActionInvocation,
+} from "./actions";
+import {
   TerminalPane,
   type SessionUnavailableReason,
   type TerminalConnectionState,
@@ -46,6 +56,7 @@ import type { TerminalStatusState } from "../../../shared/protocol";
 
 const STACK_LAYOUT_BREAKPOINT_PX = 1100;
 const SELECTED_PROJECT_STORAGE_KEY = "command-center.selected-project-id";
+const PALETTE_GROUP_ORDER: TerminalActionGroup[] = ["Session", "Project"];
 
 function selectedSessionStorageKey(projectId: string) {
   return `command-center.selected-session-id.${projectId}`;
@@ -111,6 +122,12 @@ type HookOutputDialogState = {
   title: string;
   description: string;
   hook: WorktreeHookExecutionDetails;
+};
+
+type PendingActionConfirmation = {
+  actionId: TerminalActionId;
+  invocation: TerminalActionInvocation;
+  confirmation: TerminalActionConfirmation;
 };
 
 class ApiRequestError extends Error {
@@ -466,6 +483,23 @@ function isTerminalTarget(target: EventTarget | null): boolean {
   return target instanceof HTMLElement && target.closest(".xterm") !== null;
 }
 
+function renderActionIcon(icon: TerminalActionIcon) {
+  switch (icon) {
+    case "folder":
+      return <FolderOpen className="h-4 w-4" />;
+    case "plus":
+      return <Plus className="h-4 w-4" />;
+    case "trash":
+      return <Trash2 className="h-4 w-4" />;
+    case "refresh":
+      return <RefreshCw className="h-4 w-4" />;
+    default: {
+      const neverIcon: never = icon;
+      throw new Error(`Unknown icon '${neverIcon as string}'`);
+    }
+  }
+}
+
 export function TerminalView() {
   const terminalRef = useRef<TerminalPaneHandle | null>(null);
   const commandPreviousFocusRef = useRef<HTMLElement | null>(null);
@@ -492,6 +526,7 @@ export function TerminalView() {
     return window.matchMedia(`(max-width: ${STACK_LAYOUT_BREAKPOINT_PX}px)`).matches;
   });
   const [isCommandOpen, setIsCommandOpen] = useState(false);
+  const [pendingActionConfirmation, setPendingActionConfirmation] = useState<PendingActionConfirmation | null>(null);
   const commandHotkeyLabel = useMemo(() => {
     if (typeof navigator === "undefined") {
       return "Ctrl+K";
@@ -530,9 +565,11 @@ export function TerminalView() {
     setIsCommandOpen(true);
   }, [rememberCommandFocusTarget]);
 
-  const closeCommandPalette = useCallback(() => {
+  const closeCommandPalette = useCallback((options?: { restoreFocus?: boolean }) => {
     setIsCommandOpen(false);
-    restoreCommandFocusTarget();
+    if (options?.restoreFocus ?? true) {
+      restoreCommandFocusTarget();
+    }
   }, [restoreCommandFocusTarget]);
 
   const handleCommandOpenChange = useCallback(
@@ -910,11 +947,8 @@ export function TerminalView() {
   useEffect(() => {
     if (!selectedSession) {
       setConnectionState("disconnected");
-      if (isCommandOpen) {
-        closeCommandPalette();
-      }
     }
-  }, [closeCommandPalette, isCommandOpen, selectedSession]);
+  }, [selectedSession]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -932,10 +966,6 @@ export function TerminalView() {
         return;
       }
 
-      if (!selectedSession) {
-        return;
-      }
-
       event.preventDefault();
       openCommandPalette();
     };
@@ -944,7 +974,7 @@ export function TerminalView() {
     return () => {
       window.removeEventListener("keydown", handleKeyDown, true);
     };
-  }, [closeCommandPalette, isCommandOpen, openCommandPalette, selectedSession]);
+  }, [closeCommandPalette, isCommandOpen, openCommandPalette]);
 
   const handlePickProject = async () => {
     try {
@@ -959,19 +989,8 @@ export function TerminalView() {
     }
   };
 
-  const handleDeleteProject = () => {
-    if (!selectedProject) {
-      return;
-    }
-
-    const confirmed = window.confirm(
-      `Delete project '${selectedProject.name}' and all of its sessions? This will kill all tmux sessions in that project.`,
-    );
-    if (!confirmed) {
-      return;
-    }
-
-    deleteProjectMutation.mutate(selectedProject.id);
+  const deleteProjectById = (projectId: string) => {
+    deleteProjectMutation.mutate(projectId);
   };
 
   const handleOpenProjectSettings = () => {
@@ -1074,17 +1093,8 @@ export function TerminalView() {
     createSessionMutation.mutate({ projectId: selectedProjectId, mode: "worktree", branchName });
   };
 
-  const handleDeleteSession = (sessionId: string) => {
-    if (!selectedProjectId) {
-      return;
-    }
-
-    const confirmed = window.confirm(`Delete session '${sessionId}'? This will kill the tmux session.`);
-    if (!confirmed) {
-      return;
-    }
-
-    deleteSessionMutation.mutate({ projectId: selectedProjectId, sessionId });
+  const deleteSessionById = (request: { projectId: string; sessionId: string }) => {
+    deleteSessionMutation.mutate(request);
   };
 
   const handleWorktreeHookDecision = (decision: "abort" | "continue") => {
@@ -1128,15 +1138,134 @@ export function TerminalView() {
     [queryClient, selectedProjectId],
   );
 
-  const handleReconnectCommand = useCallback(() => {
+  const reconnectSelectedSession = useCallback(() => {
     if (!selectedSession) {
       return;
     }
 
     terminalRef.current?.reconnect();
     toast.info("Reconnecting socket...");
-    closeCommandPalette();
-  }, [closeCommandPalette, selectedSession]);
+  }, [selectedSession]);
+
+  const actionContext = useMemo<TerminalActionContext>(
+    () => ({
+      selectedProjectId,
+      selectedProjectName: selectedProject?.name ?? null,
+      selectedSessionId,
+      selectedSessionName: selectedSession?.id ?? null,
+      pending: {
+        pickProject: selectProjectMutation.isPending,
+        createSession: createSessionMutation.isPending,
+        deleteProject: deleteProjectMutation.isPending,
+        deleteSession: deleteSessionMutation.isPending,
+      },
+    }),
+    [
+      createSessionMutation.isPending,
+      deleteProjectMutation.isPending,
+      deleteSessionMutation.isPending,
+      selectedProject,
+      selectedProjectId,
+      selectedSession,
+      selectedSessionId,
+      selectProjectMutation.isPending,
+    ],
+  );
+
+  const actionsById = useMemo(() => {
+    return new Map(TERMINAL_ACTIONS.map((action) => [action.id, action]));
+  }, []);
+
+  const actionsByGroup = useMemo(() => {
+    return PALETTE_GROUP_ORDER.map((group) => ({
+      group,
+      actions: TERMINAL_ACTIONS.filter((action) => action.group === group),
+    })).filter((entry) => entry.actions.length > 0);
+  }, []);
+
+  const actionHandlers = {
+    pickProject: () => {
+      void handlePickProject();
+    },
+    createSessionAuto: handleCreateMainAutoSession,
+    createSessionCustom: handleCreateMainNamedSession,
+    deleteProject: deleteProjectById,
+    deleteSession: deleteSessionById,
+    reconnectSession: reconnectSelectedSession,
+  };
+
+  const getActionAvailability = (actionId: TerminalActionId, invocation: TerminalActionInvocation) => {
+    const action = actionsById.get(actionId);
+    if (!action) {
+      return { enabled: false, disabledReason: `Unknown action '${actionId}'` };
+    }
+
+    return action.getAvailability(actionContext, invocation);
+  };
+
+  const runAction = (
+    actionId: TerminalActionId,
+    invocation: TerminalActionInvocation = { source: "button" },
+    options?: { skipConfirmation?: boolean; suppressUnavailableToast?: boolean },
+  ) => {
+    const action = actionsById.get(actionId);
+    if (!action) {
+      toast.error(`Unknown action '${actionId}'`);
+      return;
+    }
+
+    const availability = action.getAvailability(actionContext, invocation);
+    if (!availability.enabled) {
+      if (!options?.suppressUnavailableToast) {
+        toast.warning(availability.disabledReason ?? `${action.label} is unavailable`);
+      }
+      return;
+    }
+
+    const confirmation =
+      !options?.skipConfirmation && action.getConfirmation
+        ? action.getConfirmation(actionContext, invocation)
+        : null;
+    if (!options?.skipConfirmation && action.getConfirmation) {
+      if (confirmation) {
+        if (invocation.source === "palette" && isCommandOpen) {
+          closeCommandPalette({ restoreFocus: false });
+        }
+        setPendingActionConfirmation({ actionId, invocation, confirmation });
+        return;
+      }
+    }
+
+    if (invocation.source === "palette" && isCommandOpen && !confirmation) {
+      closeCommandPalette();
+    }
+
+    try {
+      action.run(actionContext, actionHandlers, invocation);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const isConfirmationPending =
+    pendingActionConfirmation?.actionId === "project.delete.current"
+      ? deleteProjectMutation.isPending
+      : pendingActionConfirmation?.actionId === "session.delete.current"
+        ? deleteSessionMutation.isPending
+        : false;
+
+  const handleConfirmPendingAction = () => {
+    if (!pendingActionConfirmation) {
+      return;
+    }
+
+    const nextAction = pendingActionConfirmation;
+    setPendingActionConfirmation(null);
+    runAction(nextAction.actionId, nextAction.invocation, { skipConfirmation: true, suppressUnavailableToast: true });
+    if (nextAction.invocation.source === "palette") {
+      restoreCommandFocusTarget();
+    }
+  };
 
   const connectionBadgeText = selectedSession ? connectionState : "no-session";
 
@@ -1204,8 +1333,10 @@ export function TerminalView() {
                         <Button
                           size="sm"
                           variant="secondary"
-                          onClick={handlePickProject}
-                          disabled={selectProjectMutation.isPending || deleteProjectMutation.isPending}
+                          onClick={() => {
+                            runAction("project.new.pick", { source: "button" }, { suppressUnavailableToast: true });
+                          }}
+                          disabled={!getActionAvailability("project.new.pick", { source: "button" }).enabled}
                         >
                           <FolderOpen className="h-4 w-4" />
                           Pick
@@ -1222,8 +1353,10 @@ export function TerminalView() {
                         <Button
                           size="sm"
                           variant="ghost"
-                          onClick={handleDeleteProject}
-                          disabled={!selectedProject || deleteProjectMutation.isPending}
+                          onClick={() => {
+                            runAction("project.delete.current", { source: "button" });
+                          }}
+                          disabled={!getActionAvailability("project.delete.current", { source: "button" }).enabled}
                         >
                           <Trash2 className="h-4 w-4" />
                           Delete
@@ -1302,7 +1435,11 @@ export function TerminalView() {
 
                         <DropdownMenu>
                           <DropdownMenuTrigger asChild>
-                            <Button size="sm" variant="secondary" disabled={createSessionMutation.isPending || !selectedProjectId}>
+                            <Button
+                              size="sm"
+                              variant="secondary"
+                              disabled={!getActionAvailability("session.new.auto", { source: "dropdown" }).enabled}
+                            >
                               <Plus className="h-4 w-4" />
                               New
                             </Button>
@@ -1310,8 +1447,22 @@ export function TerminalView() {
                           <DropdownMenuContent align="end" className="w-56">
                             <DropdownMenuLabel>Create Session</DropdownMenuLabel>
                             <DropdownMenuSeparator />
-                            <DropdownMenuItem onSelect={handleCreateMainAutoSession}>In main (auto name)</DropdownMenuItem>
-                            <DropdownMenuItem onSelect={handleCreateMainNamedSession}>In main (custom name)</DropdownMenuItem>
+                            <DropdownMenuItem
+                              onSelect={() => {
+                                runAction("session.new.auto", { source: "dropdown" });
+                              }}
+                              disabled={!getActionAvailability("session.new.auto", { source: "dropdown" }).enabled}
+                            >
+                              In main (auto name)
+                            </DropdownMenuItem>
+                            <DropdownMenuItem
+                              onSelect={() => {
+                                runAction("session.new.custom", { source: "dropdown" });
+                              }}
+                              disabled={!getActionAvailability("session.new.custom", { source: "dropdown" }).enabled}
+                            >
+                              In main (custom name)
+                            </DropdownMenuItem>
                             {selectedProject?.worktreeEnabled ? (
                               <DropdownMenuItem
                                 onSelect={handleCreateWorktreeSession}
@@ -1327,7 +1478,14 @@ export function TerminalView() {
                       {!selectedProjectId ? (
                         <div className="rounded-md border border-dashed border-border p-3 text-sm text-muted-foreground">
                           <p>Select a project path to get started.</p>
-                          <Button size="sm" variant="outline" className="mt-2" onClick={handlePickProject}>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="mt-2"
+                            onClick={() => {
+                              runAction("project.new.pick", { source: "fallback" }, { suppressUnavailableToast: true });
+                            }}
+                          >
                             <FolderOpen className="h-4 w-4" />
                             Pick project
                           </Button>
@@ -1335,7 +1493,14 @@ export function TerminalView() {
                       ) : sessions.length === 0 ? (
                         <div className="rounded-md border border-dashed border-border p-3 text-sm text-muted-foreground">
                           <p>No sessions yet in this project.</p>
-                          <Button size="sm" variant="outline" className="mt-2" onClick={handleCreateMainAutoSession}>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="mt-2"
+                            onClick={() => {
+                              runAction("session.new.auto", { source: "fallback" });
+                            }}
+                          >
                             <Plus className="h-4 w-4" />
                             Create first session
                           </Button>
@@ -1421,9 +1586,19 @@ export function TerminalView() {
                                         variant="ghost"
                                         className="h-7 w-7"
                                         onClick={() => {
-                                          handleDeleteSession(session.id);
+                                          runAction("session.delete.current", {
+                                            source: "row",
+                                            projectId: selectedProjectId ?? undefined,
+                                            sessionId: session.id,
+                                          });
                                         }}
-                                        disabled={deleteSessionMutation.isPending}
+                                        disabled={
+                                          !getActionAvailability("session.delete.current", {
+                                            source: "row",
+                                            projectId: selectedProjectId ?? undefined,
+                                            sessionId: session.id,
+                                          }).enabled
+                                        }
                                       >
                                         <Trash2 className="h-4 w-4" />
                                       </Button>
@@ -1450,27 +1625,25 @@ export function TerminalView() {
                         <span>{selectedSession.attachedClients}</span>
                       </div>
                     </div>
-
-                    <div className="flex flex-wrap gap-2">
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        className="border-border/80 bg-card/75 pr-1 font-mono"
-                        onClick={() => {
-                          openCommandPalette();
-                        }}
-                        disabled={!selectedSession}
-                      >
-                        <CommandIcon className="h-4 w-4" />
-                        Commands
-                        <span className="ml-1 rounded-sm border border-border/70 bg-card px-1.5 py-0.5 text-[10px] leading-none text-muted-foreground">
-                          {commandHotkeyLabel}
-                        </span>
-                      </Button>
-                    </div>
-
                   </>
                 ) : null}
+
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="border-border/80 bg-card/75 pr-1 font-mono"
+                    onClick={() => {
+                      openCommandPalette();
+                    }}
+                  >
+                    <CommandIcon className="h-4 w-4" />
+                    Commands
+                    <span className="ml-1 rounded-sm border border-border/70 bg-card px-1.5 py-0.5 text-[10px] leading-none text-muted-foreground">
+                      {commandHotkeyLabel}
+                    </span>
+                  </Button>
+                </div>
               </CardContent>
             </Card>
           </ResizablePanel>
@@ -1494,7 +1667,17 @@ export function TerminalView() {
                   <div className="flex h-full items-center justify-center rounded-none border border-border/30 bg-[#1f1811] text-center text-sm text-muted-foreground">
                     <div className="space-y-2">
                       <p>{selectedProjectId ? "No session selected." : "No project selected."}</p>
-                      <Button size="sm" variant="secondary" onClick={selectedProjectId ? handleCreateMainAutoSession : handlePickProject}>
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        onClick={() => {
+                          if (selectedProjectId) {
+                            runAction("session.new.auto", { source: "fallback" });
+                          } else {
+                            runAction("project.new.pick", { source: "fallback" });
+                          }
+                        }}
+                      >
                         {selectedProjectId ? <Plus className="h-4 w-4" /> : <FolderOpen className="h-4 w-4" />}
                         {selectedProjectId ? "Create session" : "Pick project"}
                       </Button>
@@ -1511,8 +1694,9 @@ export function TerminalView() {
         <div className="border-b border-border/70 bg-muted/15 px-4 py-3">
           <div className="flex items-center justify-between gap-3">
             <div className="min-w-0">
-              <p className="truncate font-heading text-base text-foreground">Session Commands</p>
+              <p className="truncate font-heading text-base text-foreground">Command Palette</p>
               <p className="truncate font-mono text-[11px] text-muted-foreground">
+                {selectedProject ? selectedProject.name : "No project selected"} ·{" "}
                 {selectedSession ? selectedSession.id : "No session selected"}
               </p>
             </div>
@@ -1524,25 +1708,56 @@ export function TerminalView() {
         <CommandInput placeholder="Type a command..." />
         <CommandList>
           <CommandEmpty>No matching commands.</CommandEmpty>
-          <CommandGroup heading="Session">
-            <CommandItem
-              className="group"
-              onSelect={() => {
-                handleReconnectCommand();
-              }}
-              disabled={!selectedSession}
-            >
-              <span className="flex h-7 w-7 items-center justify-center rounded-sm border border-border/70 bg-card/60 text-muted-foreground transition-colors group-data-[selected=true]:border-primary/35 group-data-[selected=true]:bg-primary/12 group-data-[selected=true]:text-primary">
-                <RefreshCw className="h-4 w-4" />
-              </span>
-              <span className="font-medium">Reconnect</span>
-              <CommandShortcut>Enter</CommandShortcut>
-            </CommandItem>
-          </CommandGroup>
-          <CommandSeparator />
+          {actionsByGroup.map((entry) => (
+            <CommandGroup key={entry.group} heading={entry.group}>
+              {entry.actions.map((action) => {
+                const availability = getActionAvailability(action.id, { source: "palette" });
+                return (
+                  <CommandItem
+                    key={action.id}
+                    className="group"
+                    disabled={!availability.enabled}
+                    onSelect={() => {
+                      runAction(action.id, { source: "palette" });
+                    }}
+                  >
+                    <span className="flex h-7 w-7 items-center justify-center rounded-sm border border-border/70 bg-card/60 text-muted-foreground transition-colors group-data-[selected=true]:border-primary/35 group-data-[selected=true]:bg-primary/12 group-data-[selected=true]:text-primary">
+                      {renderActionIcon(action.icon)}
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="block font-medium">{action.label}</span>
+                      <span className="block truncate font-mono text-[11px] text-muted-foreground">
+                        {availability.enabled ? action.description : availability.disabledReason ?? action.description}
+                      </span>
+                    </span>
+                    {action.paletteShortcut ? <CommandShortcut>{action.paletteShortcut}</CommandShortcut> : null}
+                  </CommandItem>
+                );
+              })}
+            </CommandGroup>
+          ))}
           <div className="px-3 pb-2 pt-2 font-mono text-[11px] text-muted-foreground">Press Esc to close.</div>
         </CommandList>
       </CommandDialog>
+
+      <ConfirmDialog
+        open={pendingActionConfirmation !== null}
+        title={pendingActionConfirmation?.confirmation.title ?? ""}
+        description={pendingActionConfirmation?.confirmation.description ?? ""}
+        confirmLabel={pendingActionConfirmation?.confirmation.confirmLabel ?? "Confirm"}
+        cancelLabel={pendingActionConfirmation?.confirmation.cancelLabel ?? "Cancel"}
+        tone={pendingActionConfirmation?.confirmation.tone ?? "default"}
+        pending={isConfirmationPending}
+        onOpenChange={(open) => {
+          if (!open) {
+            if (pendingActionConfirmation?.invocation.source === "palette") {
+              restoreCommandFocusTarget();
+            }
+            setPendingActionConfirmation(null);
+          }
+        }}
+        onConfirm={handleConfirmPendingAction}
+      />
 
       {isProjectSettingsOpen && selectedProject ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4">

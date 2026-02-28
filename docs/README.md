@@ -160,8 +160,20 @@ Responsibilities:
 - Manages per-project manual session ordering
 - Renders left control pane and right terminal pane
 - Exposes project actions (pick, enter path, settings, delete)
-- Exposes a session command palette (`Cmd/Ctrl+K`) for session-scoped actions like reconnect
+- Uses a shared frontend action registry so commands can be invoked from both UI controls and command palette
+- Exposes a global command palette (`Cmd/Ctrl+K`) with session commands first, then project commands:
+  - new project
+  - delete project
+  - new session (auto/custom)
+  - delete session
+  - reconnect
+- Uses a shared confirmation dialog for destructive actions (delete session/project) instead of `window.confirm`
 - Includes a modal for per-project worktree settings
+
+Action registry files:
+
+- `src/web/components/terminal/actions.ts` (action ids, availability rules, confirmation metadata, handlers)
+- `src/web/components/ui/confirm-dialog.tsx` (shared destructive/default confirmation dialog)
 
 Left pane structure:
 

@@ -1,0 +1,232 @@
+export type TerminalActionId =
+  | "project.new.pick"
+  | "project.delete.current"
+  | "session.new.auto"
+  | "session.new.custom"
+  | "session.delete.current"
+  | "session.reconnect";
+
+export type TerminalActionGroup = "Project" | "Session";
+export type TerminalActionIcon = "folder" | "plus" | "trash" | "refresh";
+export type TerminalActionSource = "palette" | "button" | "dropdown" | "row" | "fallback";
+
+export interface TerminalActionInvocation {
+  source: TerminalActionSource;
+  projectId?: string;
+  sessionId?: string;
+}
+
+export interface TerminalActionAvailability {
+  enabled: boolean;
+  disabledReason?: string;
+}
+
+export interface TerminalActionConfirmation {
+  title: string;
+  description: string;
+  confirmLabel: string;
+  cancelLabel?: string;
+  tone?: "default" | "destructive";
+}
+
+export interface TerminalActionContext {
+  selectedProjectId: string | null;
+  selectedProjectName: string | null;
+  selectedSessionId: string | null;
+  selectedSessionName: string | null;
+  pending: {
+    pickProject: boolean;
+    createSession: boolean;
+    deleteSession: boolean;
+    deleteProject: boolean;
+  };
+}
+
+export interface TerminalActionHandlers {
+  pickProject: () => void | Promise<void>;
+  createSessionAuto: () => void;
+  createSessionCustom: () => void;
+  deleteProject: (projectId: string) => void;
+  deleteSession: (request: { projectId: string; sessionId: string }) => void;
+  reconnectSession: () => void;
+}
+
+export interface TerminalActionDefinition {
+  id: TerminalActionId;
+  label: string;
+  description: string;
+  group: TerminalActionGroup;
+  icon: TerminalActionIcon;
+  keywords: string[];
+  paletteShortcut?: string;
+  getAvailability: (context: TerminalActionContext, invocation: TerminalActionInvocation) => TerminalActionAvailability;
+  getConfirmation?: (
+    context: TerminalActionContext,
+    invocation: TerminalActionInvocation,
+  ) => TerminalActionConfirmation | null;
+  run: (context: TerminalActionContext, handlers: TerminalActionHandlers, invocation: TerminalActionInvocation) => void;
+}
+
+function resolveProjectId(context: TerminalActionContext, invocation: TerminalActionInvocation): string | null {
+  return invocation.projectId ?? context.selectedProjectId ?? null;
+}
+
+function resolveSessionId(context: TerminalActionContext, invocation: TerminalActionInvocation): string | null {
+  return invocation.sessionId ?? context.selectedSessionId ?? null;
+}
+
+export const TERMINAL_ACTIONS: TerminalActionDefinition[] = [
+  {
+    id: "project.new.pick",
+    label: "New Project",
+    description: "Pick a directory and select it as a project.",
+    group: "Project",
+    icon: "folder",
+    keywords: ["project", "new", "pick", "directory", "folder"],
+    getAvailability: (context) => {
+      if (context.pending.pickProject) {
+        return { enabled: false, disabledReason: "Project picker is already open" };
+      }
+      return { enabled: true };
+    },
+    run: (_context, handlers) => {
+      void handlers.pickProject();
+    },
+  },
+  {
+    id: "project.delete.current",
+    label: "Delete Project",
+    description: "Delete selected project and all project sessions.",
+    group: "Project",
+    icon: "trash",
+    keywords: ["project", "delete", "remove"],
+    getAvailability: (context, invocation) => {
+      if (!resolveProjectId(context, invocation)) {
+        return { enabled: false, disabledReason: "Select a project first" };
+      }
+      if (context.pending.deleteProject) {
+        return { enabled: false, disabledReason: "Project deletion already in progress" };
+      }
+      return { enabled: true };
+    },
+    getConfirmation: (context, invocation) => {
+      const projectId = resolveProjectId(context, invocation);
+      if (!projectId) {
+        return null;
+      }
+      const projectName = context.selectedProjectName ?? projectId;
+      return {
+        title: "Delete project?",
+        description: `Delete project '${projectName}' and all of its sessions? This will kill all tmux sessions in that project.`,
+        confirmLabel: "Delete project",
+        tone: "destructive",
+      };
+    },
+    run: (context, handlers, invocation) => {
+      const projectId = resolveProjectId(context, invocation);
+      if (!projectId) {
+        return;
+      }
+      handlers.deleteProject(projectId);
+    },
+  },
+  {
+    id: "session.new.auto",
+    label: "New Session (Auto)",
+    description: "Create a new main session with auto-generated name.",
+    group: "Session",
+    icon: "plus",
+    keywords: ["session", "new", "create", "auto"],
+    getAvailability: (context) => {
+      if (!context.selectedProjectId) {
+        return { enabled: false, disabledReason: "Select a project first" };
+      }
+      if (context.pending.createSession) {
+        return { enabled: false, disabledReason: "Session creation in progress" };
+      }
+      return { enabled: true };
+    },
+    run: (_context, handlers) => {
+      handlers.createSessionAuto();
+    },
+  },
+  {
+    id: "session.new.custom",
+    label: "New Session (Custom)",
+    description: "Create a new main session and optionally set its name.",
+    group: "Session",
+    icon: "plus",
+    keywords: ["session", "new", "create", "custom", "name"],
+    getAvailability: (context) => {
+      if (!context.selectedProjectId) {
+        return { enabled: false, disabledReason: "Select a project first" };
+      }
+      if (context.pending.createSession) {
+        return { enabled: false, disabledReason: "Session creation in progress" };
+      }
+      return { enabled: true };
+    },
+    run: (_context, handlers) => {
+      handlers.createSessionCustom();
+    },
+  },
+  {
+    id: "session.delete.current",
+    label: "Delete Session",
+    description: "Delete the selected session.",
+    group: "Session",
+    icon: "trash",
+    keywords: ["session", "delete", "remove"],
+    getAvailability: (context, invocation) => {
+      const projectId = resolveProjectId(context, invocation);
+      if (!projectId) {
+        return { enabled: false, disabledReason: "Select a project first" };
+      }
+      if (!resolveSessionId(context, invocation)) {
+        return { enabled: false, disabledReason: "Select a session first" };
+      }
+      if (context.pending.deleteSession) {
+        return { enabled: false, disabledReason: "Session deletion already in progress" };
+      }
+      return { enabled: true };
+    },
+    getConfirmation: (context, invocation) => {
+      const sessionId = resolveSessionId(context, invocation);
+      if (!sessionId) {
+        return null;
+      }
+      return {
+        title: "Delete session?",
+        description: `Delete session '${sessionId}'? This will kill the tmux session.`,
+        confirmLabel: "Delete session",
+        tone: "destructive",
+      };
+    },
+    run: (context, handlers, invocation) => {
+      const projectId = resolveProjectId(context, invocation);
+      const sessionId = resolveSessionId(context, invocation);
+      if (!projectId || !sessionId) {
+        return;
+      }
+      handlers.deleteSession({ projectId, sessionId });
+    },
+  },
+  {
+    id: "session.reconnect",
+    label: "Reconnect",
+    description: "Reconnect WebSocket to selected session.",
+    group: "Session",
+    icon: "refresh",
+    keywords: ["session", "reconnect", "socket", "websocket"],
+    paletteShortcut: "Enter",
+    getAvailability: (context, invocation) => {
+      if (!resolveSessionId(context, invocation)) {
+        return { enabled: false, disabledReason: "Select a session first" };
+      }
+      return { enabled: true };
+    },
+    run: (_context, handlers) => {
+      handlers.reconnectSession();
+    },
+  },
+];
