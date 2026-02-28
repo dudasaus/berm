@@ -2,6 +2,14 @@
 
 This is a high-volume feature backlog for future planning. It mixes near-term pragmatic wins with bigger bets.
 
+## Implemented
+
+- Session lifecycle tracking shipped:
+  - Persistent session state model: `planning`, `exploration`, `implementing`, `in_review`, `submitted_pr`, `merged`, `blocked`, `paused`.
+  - Manual state changes from both command palette and session-row controls.
+  - UI badges and “time in state” visibility in session list/details.
+  - Backend persistence + API support for lifecycle updates.
+
 ## Session lifecycle and task tracking
 
 - Session status model: `planning`, `exploration`, `implementing`, `in_review`, `submitted_pr`, `merged`, `blocked`, `paused`.
