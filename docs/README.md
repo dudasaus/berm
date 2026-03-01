@@ -185,6 +185,7 @@ Responsibilities:
   - delete session
   - reconnect
   - set session lifecycle state (`planning`, `exploration`, `implementing`, `in review`, `submitted PR`, `merged`, `blocked`, `paused`)
+  - toggle sidebar (`Cmd/Ctrl+B`)
   - toggle wide mode (full-width layout with minimal side padding)
   - hide header / show header
 - Renders session lifecycle badges and "time in state" in the session list
@@ -228,6 +229,7 @@ Stored in web storage:
 - Selected session ID per project in `sessionStorage`
 - Session order per project in `localStorage`
 - Header visibility in `localStorage` (`berm.header-visible`)
+- Sidebar visibility in `localStorage` (`berm.sidebar-visible`)
 - Wide mode in `localStorage` (`berm.wide-mode`)
 - Workspace layout per project in `localStorage` (`berm.workspace-layout.<projectId>`)
 - Workspace slot assignments per project in `localStorage` (`berm.workspace-slots.<projectId>`)
