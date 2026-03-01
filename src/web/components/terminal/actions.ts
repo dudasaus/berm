@@ -14,6 +14,7 @@ export type TerminalActionId =
   | "session.delete.current"
   | "session.reconnect"
   | SessionLifecycleActionId
+  | "view.toggle-sidebar"
   | "view.toggle-wide-mode"
   | "view.hide-header"
   | "view.show-header";
@@ -32,6 +33,7 @@ export type TerminalActionIcon =
   | "merged"
   | "blocked"
   | "paused"
+  | "panel-left"
   | "expand"
   | "eye-open"
   | "eye-closed";
@@ -62,6 +64,7 @@ export interface TerminalActionContext {
   selectedSessionId: string | null;
   selectedSessionName: string | null;
   selectedSessionLifecycleState: SessionLifecycleState | null;
+  isSidebarVisible: boolean;
   isWideMode: boolean;
   isHeaderVisible: boolean;
   pending: {
@@ -85,6 +88,7 @@ export interface TerminalActionHandlers {
     sessionId: string;
     lifecycleState: SessionLifecycleState;
   }) => void;
+  toggleSidebar: () => void;
   toggleWideMode: () => void;
   hideHeader: () => void;
   showHeader: () => void;
@@ -337,6 +341,21 @@ export const TERMINAL_ACTIONS: TerminalActionDefinition[] = [
         return;
       }
       handlers.deleteProject(projectId);
+    },
+  },
+  {
+    id: "view.toggle-sidebar",
+    label: "Toggle Sidebar",
+    description: "Show or hide the left control sidebar.",
+    group: "View",
+    icon: "panel-left",
+    keywords: ["view", "sidebar", "left pane", "toggle", "hide", "show"],
+    paletteShortcut: "⌘B / Ctrl+B",
+    getAvailability: () => {
+      return { enabled: true };
+    },
+    run: (_context, handlers) => {
+      handlers.toggleSidebar();
     },
   },
   {

@@ -15,6 +15,7 @@ import {
   Hammer,
   MoreHorizontal,
   PauseCircle,
+  PanelLeft,
   Pin,
   PinOff,
   Plus,
@@ -76,6 +77,7 @@ import type { TerminalStatusState } from "../../../shared/protocol";
 const STACK_LAYOUT_BREAKPOINT_PX = 1100;
 const SELECTED_PROJECT_STORAGE_KEY = "berm.selected-project-id";
 const HEADER_VISIBLE_STORAGE_KEY = "berm.header-visible";
+const SIDEBAR_VISIBLE_STORAGE_KEY = "berm.sidebar-visible";
 const WIDE_MODE_STORAGE_KEY = "berm.wide-mode";
 const WORKSPACE_BOARD_STORAGE_KEY = "berm.workspace-board";
 const MAX_WORKSPACE_SLOTS = 4;
@@ -654,6 +656,18 @@ function readStoredWideMode(): boolean {
   return window.localStorage.getItem(WIDE_MODE_STORAGE_KEY) === "true";
 }
 
+function readStoredSidebarVisible(): boolean {
+  if (typeof window === "undefined") {
+    return true;
+  }
+
+  const stored = window.localStorage.getItem(SIDEBAR_VISIBLE_STORAGE_KEY);
+  if (stored === "false") {
+    return false;
+  }
+  return true;
+}
+
 function readStoredWorkspaceLayout(projectId: string): WorkspaceLayoutMode {
   if (typeof window === "undefined") {
     return "single";
@@ -865,6 +879,8 @@ function renderActionIcon(icon: TerminalActionIcon) {
       return <AlertTriangle className="h-4 w-4" />;
     case "paused":
       return <PauseCircle className="h-4 w-4" />;
+    case "panel-left":
+      return <PanelLeft className="h-4 w-4" />;
     case "eye-open":
       return <Eye className="h-4 w-4" />;
     case "eye-closed":
@@ -928,6 +944,7 @@ export function TerminalView() {
   const [worktreeHookFailure, setWorktreeHookFailure] = useState<WorktreeHookFailurePayload | null>(null);
   const [hookOutputDialog, setHookOutputDialog] = useState<HookOutputDialogState | null>(null);
   const [isWideMode, setIsWideMode] = useState(() => readStoredWideMode());
+  const [isSidebarVisible, setIsSidebarVisible] = useState(() => readStoredSidebarVisible());
   const [isHeaderVisible, setIsHeaderVisible] = useState(() => readStoredHeaderVisible());
   const [isStackedLayout, setIsStackedLayout] = useState(() => {
     if (typeof window === "undefined") {
@@ -982,6 +999,25 @@ export function TerminalView() {
       restoreCommandFocusTarget();
     }
   }, [restoreCommandFocusTarget]);
+
+  const focusTerminalSession = useCallback((sessionId: string) => {
+    let attempts = 0;
+
+    const tryFocus = () => {
+      const pane = terminalRefs.current[sessionId];
+      if (pane) {
+        pane.focus();
+        return;
+      }
+
+      attempts += 1;
+      if (attempts < 12) {
+        window.requestAnimationFrame(tryFocus);
+      }
+    };
+
+    window.requestAnimationFrame(tryFocus);
+  }, []);
 
   const handleCommandOpenChange = useCallback(
     (nextOpen: boolean) => {
@@ -1101,6 +1137,10 @@ export function TerminalView() {
   useEffect(() => {
     window.localStorage.setItem(WIDE_MODE_STORAGE_KEY, isWideMode ? "true" : "false");
   }, [isWideMode]);
+
+  useEffect(() => {
+    window.localStorage.setItem(SIDEBAR_VISIBLE_STORAGE_KEY, isSidebarVisible ? "true" : "false");
+  }, [isSidebarVisible]);
 
   const healthQuery = useQuery({
     queryKey: ["health"],
@@ -1515,6 +1555,19 @@ export function TerminalView() {
     () => (actionTargetSessionId ? (sessionById.get(actionTargetSessionId) ?? null) : null),
     [actionTargetSessionId, sessionById],
   );
+
+  const toggleSidebar = useCallback(() => {
+    const activeElement = typeof document === "undefined" ? null : document.activeElement;
+    const wasFocusedInTerminal = isTerminalTarget(activeElement);
+    const sessionIdToRefocus =
+      activeWorkspaceSessionId ?? activeVisibleSlotSessionId ?? selectedSessionId ?? null;
+
+    setIsSidebarVisible((current) => !current);
+
+    if (wasFocusedInTerminal && sessionIdToRefocus) {
+      focusTerminalSession(sessionIdToRefocus);
+    }
+  }, [activeVisibleSlotSessionId, activeWorkspaceSessionId, focusTerminalSession, selectedSessionId]);
   const selectedConnectionState = selectedSession
     ? (connectionBySessionId[selectedSession.id] ?? "disconnected")
     : "disconnected";
@@ -1627,7 +1680,22 @@ export function TerminalView() {
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key.toLowerCase() !== "k" || (!event.metaKey && !event.ctrlKey) || event.shiftKey || event.altKey) {
+      const key = event.key.toLowerCase();
+      if ((!event.metaKey && !event.ctrlKey) || event.shiftKey || event.altKey) {
+        return;
+      }
+
+      if (key === "b") {
+        if (isTextEntryTarget(event.target) && !isTerminalTarget(event.target) && !isCommandOpen) {
+          return;
+        }
+
+        event.preventDefault();
+        toggleSidebar();
+        return;
+      }
+
+      if (key !== "k") {
         return;
       }
 
@@ -1649,7 +1717,7 @@ export function TerminalView() {
     return () => {
       window.removeEventListener("keydown", handleKeyDown, true);
     };
-  }, [closeCommandPalette, isCommandOpen, openCommandPalette]);
+  }, [closeCommandPalette, isCommandOpen, openCommandPalette, toggleSidebar]);
 
   const handlePickProject = async () => {
     try {
@@ -1989,6 +2057,7 @@ export function TerminalView() {
       selectedSessionId: actionTargetSession?.id ?? null,
       selectedSessionName: actionTargetSession?.id ?? null,
       selectedSessionLifecycleState: actionTargetSession?.lifecycleState ?? null,
+      isSidebarVisible,
       isWideMode,
       isHeaderVisible,
       pending: {
@@ -2004,6 +2073,7 @@ export function TerminalView() {
       deleteProjectMutation.isPending,
       deleteSessionMutation.isPending,
       isHeaderVisible,
+      isSidebarVisible,
       isWideMode,
       selectedProject,
       selectedProjectId,
@@ -2034,6 +2104,7 @@ export function TerminalView() {
     deleteSession: deleteSessionById,
     reconnectSession: reconnectSelectedSession,
     setSessionLifecycleState: setSessionLifecycleStateById,
+    toggleSidebar,
     toggleWideMode: () => {
       setIsWideMode((current) => !current);
     },
@@ -2175,9 +2246,15 @@ export function TerminalView() {
           direction={isStackedLayout ? "vertical" : "horizontal"}
           className="min-h-0 flex-1 rounded-xl border border-border bg-card/40"
         >
-          <ResizablePanel defaultSize={isStackedLayout ? 36 : 28} minSize={isStackedLayout ? 25 : 20} className="min-h-0">
-            <Card className="flex h-full min-h-0 flex-col rounded-none border-0 bg-transparent shadow-none">
-              <CardContent className="min-h-0 flex-1 space-y-4 overflow-y-auto p-3">
+          {isSidebarVisible ? (
+            <ResizablePanel
+              key="sidebar-panel"
+              defaultSize={isStackedLayout ? 36 : 28}
+              minSize={isStackedLayout ? 25 : 20}
+              className="min-h-0"
+            >
+              <Card className="flex h-full min-h-0 flex-col rounded-none border-0 bg-transparent shadow-none">
+                <CardContent className="min-h-0 flex-1 space-y-4 overflow-y-auto p-3">
                 <section className="rounded-md border border-border bg-card/60 p-2">
                   <button
                     type="button"
@@ -2770,13 +2847,18 @@ export function TerminalView() {
                     </span>
                   </Button>
                 </div>
-              </CardContent>
-            </Card>
-          </ResizablePanel>
+                </CardContent>
+              </Card>
+            </ResizablePanel>
+          ) : null}
 
-          <ResizableHandle withHandle handleDirection={isStackedLayout ? "vertical" : "horizontal"} />
+          {isSidebarVisible ? <ResizableHandle withHandle handleDirection={isStackedLayout ? "vertical" : "horizontal"} /> : null}
 
-          <ResizablePanel defaultSize={isStackedLayout ? 64 : 72} minSize={isStackedLayout ? 40 : 35}>
+          <ResizablePanel
+            key="workspace-panel"
+            defaultSize={isSidebarVisible ? (isStackedLayout ? 64 : 72) : 100}
+            minSize={isSidebarVisible ? (isStackedLayout ? 40 : 35) : 100}
+          >
             <Card className="h-full rounded-none border-0 bg-transparent shadow-none">
               <CardContent className="h-full rounded-none bg-[#1f1811] p-3">
                 {selectedProjectId ? (

@@ -13,6 +13,7 @@ export interface TerminalPaneHandle {
   clear: () => void;
   reset: () => void;
   reconnect: () => void;
+  focus: () => void;
 }
 
 interface TerminalPaneProps {
@@ -257,6 +258,9 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(
           sendMessage({ type: "reset" });
         },
         reconnect,
+        focus() {
+          terminalRef.current?.focus();
+        },
       }),
       [reconnect, sendMessage],
     );
