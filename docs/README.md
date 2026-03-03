@@ -185,7 +185,7 @@ Responsibilities:
   - delete session
   - reconnect
   - set session lifecycle state (`planning`, `exploration`, `implementing`, `in review`, `submitted PR`, `merged`, `blocked`, `paused`)
-  - toggle sidebar (`Cmd/Ctrl+B`)
+  - toggle sidebar (`Cmd/Ctrl+Shift+B`)
   - toggle wide mode (full-width layout with minimal side padding)
   - hide header / show header
 - Renders session lifecycle badges and "time in state" in the session list

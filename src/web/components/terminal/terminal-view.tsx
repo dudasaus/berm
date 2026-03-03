@@ -1681,11 +1681,15 @@ export function TerminalView() {
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       const key = event.key.toLowerCase();
-      if ((!event.metaKey && !event.ctrlKey) || event.shiftKey || event.altKey) {
+      if ((!event.metaKey && !event.ctrlKey) || event.altKey) {
         return;
       }
 
       if (key === "b") {
+        if (!event.shiftKey) {
+          return;
+        }
+
         if (isTextEntryTarget(event.target) && !isTerminalTarget(event.target) && !isCommandOpen) {
           return;
         }
@@ -1696,6 +1700,10 @@ export function TerminalView() {
       }
 
       if (key !== "k") {
+        return;
+      }
+
+      if (event.shiftKey) {
         return;
       }
 

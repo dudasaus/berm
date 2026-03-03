@@ -22,7 +22,7 @@ Web terminal app powered by Bun PTY + zsh on the backend and TanStack React + xt
 - A cross-project workspace board lets you pin sessions from any project and jump back to them quickly.
 - Workspace slot headers show `Focused` / `Active` / `Live` status with tooltips for quick context.
 - Session-level actions (including command palette actions) default to the active slot session.
-- The left control sidebar can be toggled with `Cmd/Ctrl+B` or from the command palette.
+- The left control sidebar can be toggled with `Cmd/Ctrl+Shift+B` or from the command palette.
 - Session tiles can show synced GitHub PR/CI status via `gh` (`open`/`draft`/`merged` and check summary).
 
 ## Docs

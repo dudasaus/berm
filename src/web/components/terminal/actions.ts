@@ -350,7 +350,7 @@ export const TERMINAL_ACTIONS: TerminalActionDefinition[] = [
     group: "View",
     icon: "panel-left",
     keywords: ["view", "sidebar", "left pane", "toggle", "hide", "show"],
-    paletteShortcut: "⌘B / Ctrl+B",
+    paletteShortcut: "⌘⇧B / Ctrl+Shift+B",
     getAvailability: () => {
       return { enabled: true };
     },
