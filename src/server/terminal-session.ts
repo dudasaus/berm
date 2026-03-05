@@ -105,6 +105,42 @@ export interface CreateSessionResult {
   hook: WorktreeHookExecutionDetails | null;
 }
 
+export type ImportWorktreeSkipReason = "main_worktree" | "detached_head" | "session_exists";
+export type ImportWorktreeCandidateStatus = "importable" | ImportWorktreeSkipReason;
+
+export interface ImportWorktreeCandidate {
+  workspacePath: string;
+  branchName: string | null;
+  status: ImportWorktreeCandidateStatus;
+}
+
+export interface ListImportWorktreeCandidatesResult {
+  candidates: ImportWorktreeCandidate[];
+}
+
+export interface ImportWorktreeSessionsRequest {
+  workspacePaths?: string[];
+}
+
+export interface ImportWorktreeSkippedEntry {
+  workspacePath: string;
+  branchName: string | null;
+  reason: ImportWorktreeSkipReason;
+}
+
+export interface ImportWorktreeFailedEntry {
+  workspacePath: string;
+  branchName: string | null;
+  code: string;
+  error: string;
+}
+
+export interface ImportWorktreeSessionsResult {
+  imported: SessionMetadata[];
+  skipped: ImportWorktreeSkippedEntry[];
+  failed: ImportWorktreeFailedEntry[];
+}
+
 interface SessionAttachment {
   client: SessionClient;
   proc: Bun.Subprocess;
@@ -133,6 +169,12 @@ interface TerminalSession {
 interface TmuxSessionRef {
   tmuxSessionName: string;
   createdAtMs: number;
+}
+
+interface GitWorktreeRef {
+  workspacePath: string;
+  branchName: string | null;
+  detached: boolean;
 }
 
 interface TerminalSessionManagerOptions {
@@ -252,6 +294,56 @@ function sanitizePathToken(value: string): string {
     .replace(/^-+/, "")
     .replace(/-+$/, "")
     .slice(0, 64);
+}
+
+function parseGitWorktreeList(stdout: string): GitWorktreeRef[] {
+  const entries: GitWorktreeRef[] = [];
+  const lines = stdout.split("\n");
+  let workspacePath: string | null = null;
+  let branchName: string | null = null;
+  let detached = false;
+
+  const flush = () => {
+    if (!workspacePath) {
+      return;
+    }
+
+    entries.push({
+      workspacePath,
+      branchName,
+      detached,
+    });
+  };
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line) {
+      flush();
+      workspacePath = null;
+      branchName = null;
+      detached = false;
+      continue;
+    }
+
+    if (line.startsWith("worktree ")) {
+      workspacePath = line.slice("worktree ".length).trim() || null;
+      continue;
+    }
+
+    if (line.startsWith("branch ")) {
+      const refName = line.slice("branch ".length).trim();
+      const prefix = "refs/heads/";
+      branchName = refName.startsWith(prefix) ? refName.slice(prefix.length) : null;
+      continue;
+    }
+
+    if (line === "detached") {
+      detached = true;
+    }
+  }
+
+  flush();
+  return entries;
 }
 
 function isMissingBranchError(stderr: string): boolean {
@@ -642,6 +734,157 @@ export class TerminalSessionManager {
       }),
       hook: null,
     };
+  }
+
+  listImportWorktreeCandidates(projectId: string): ListImportWorktreeCandidatesResult {
+    this.syncSessionsFromTmux();
+    this.assertAvailable();
+
+    const project = this.requireProject(projectId);
+    const listResult = this.runGit(project.path, ["worktree", "list", "--porcelain"]);
+    if (listResult.exitCode !== 0) {
+      throw new SessionManagerError(
+        `Failed to list git worktrees: ${listResult.stderr || "unknown error"}`,
+        500,
+        "WORKTREE_IMPORT_LIST_FAILED",
+      );
+    }
+
+    const candidates: ImportWorktreeCandidate[] = [];
+    for (const worktree of parseGitWorktreeList(listResult.stdout)) {
+      if (worktree.workspacePath === project.path) {
+        candidates.push({
+          workspacePath: worktree.workspacePath,
+          branchName: worktree.branchName,
+          status: "main_worktree",
+        });
+        continue;
+      }
+
+      if (worktree.detached || !worktree.branchName) {
+        candidates.push({
+          workspacePath: worktree.workspacePath,
+          branchName: worktree.branchName,
+          status: "detached_head",
+        });
+        continue;
+      }
+
+      const branchName = worktree.branchName;
+      const key = this.sessionKey(project.id, branchName);
+      if (this.sessions.has(key) || this.registrySessions.has(key)) {
+        candidates.push({
+          workspacePath: worktree.workspacePath,
+          branchName,
+          status: "session_exists",
+        });
+        continue;
+      }
+
+      candidates.push({
+        workspacePath: worktree.workspacePath,
+        branchName,
+        status: "importable",
+      });
+    }
+
+    return { candidates };
+  }
+
+  importWorktreeSessions(projectId: string, request: ImportWorktreeSessionsRequest = {}): ImportWorktreeSessionsResult {
+    this.syncSessionsFromTmux();
+    this.assertAvailable();
+
+    const selectedWorkspacePaths =
+      Array.isArray(request.workspacePaths)
+        ? new Set(
+            request.workspacePaths
+              .filter((value): value is string => typeof value === "string")
+              .map((value) => value.trim())
+              .filter((value) => value.length > 0)
+              .map((value) => {
+                try {
+                  return realpathSync(value);
+                } catch {
+                  return value;
+                }
+              }),
+          )
+        : null;
+
+    const project = this.requireProject(projectId);
+    const imported: SessionMetadata[] = [];
+    const skipped: ImportWorktreeSkippedEntry[] = [];
+    const failed: ImportWorktreeFailedEntry[] = [];
+
+    const candidates = this.listImportWorktreeCandidates(projectId).candidates;
+    for (const candidate of candidates) {
+      if (selectedWorkspacePaths && !selectedWorkspacePaths.has(candidate.workspacePath)) {
+        continue;
+      }
+
+      if (candidate.status !== "importable") {
+        skipped.push({
+          workspacePath: candidate.workspacePath,
+          branchName: candidate.branchName,
+          reason: candidate.status,
+        });
+        continue;
+      }
+
+      if (!candidate.branchName) {
+        skipped.push({
+          workspacePath: candidate.workspacePath,
+          branchName: null,
+          reason: "detached_head",
+        });
+        continue;
+      }
+
+      try {
+        this.validateBranchName(candidate.branchName);
+        const key = this.sessionKey(project.id, candidate.branchName);
+        if (this.sessions.has(key) || this.registrySessions.has(key)) {
+          skipped.push({
+            workspacePath: candidate.workspacePath,
+            branchName: candidate.branchName,
+            reason: "session_exists",
+          });
+          continue;
+        }
+
+        const tmuxName = sessionTmuxName(project.id, candidate.branchName);
+        if (this.tmuxSessionExists(tmuxName)) {
+          imported.push(
+            this.adoptTrackedSession(project, {
+              sessionId: candidate.branchName,
+              workspaceType: "worktree",
+              workspacePath: candidate.workspacePath,
+              branchName: candidate.branchName,
+            }),
+          );
+          continue;
+        }
+
+        imported.push(
+          this.createTrackedSession(project, {
+            sessionId: candidate.branchName,
+            workspaceType: "worktree",
+            workspacePath: candidate.workspacePath,
+            branchName: candidate.branchName,
+          }),
+        );
+      } catch (error) {
+        failed.push({
+          workspacePath: candidate.workspacePath,
+          branchName: candidate.branchName,
+          code: isSessionManagerError(error) ? error.code : "WORKTREE_IMPORT_CREATE_FAILED",
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+
+    return { imported, skipped, failed };
   }
 
   resolveWorktreeHookDecision(
@@ -1173,6 +1416,64 @@ export class TerminalSessionManager {
         `Failed to create tmux session '${input.sessionId}': ${details}`,
         500,
         "SESSION_CREATE_FAILED",
+      );
+    }
+
+    const now = Date.now();
+    const nowIso = new Date(now).toISOString();
+    this.registrySessions.set(key, {
+      projectId: project.id,
+      sessionId: input.sessionId,
+      tmuxSessionName,
+      createdAt: nowIso,
+      lastActiveAt: nowIso,
+      workspaceType: input.workspaceType,
+      workspacePath: input.workspacePath,
+      branchName: input.branchName,
+      lifecycleState: DEFAULT_SESSION_LIFECYCLE_STATE,
+      lifecycleUpdatedAt: nowIso,
+    });
+    this.saveRegistry();
+
+    const session: TerminalSession = {
+      key,
+      projectId: project.id,
+      id: input.sessionId,
+      tmuxSessionName,
+      cols: this.options.defaultCols,
+      rows: this.options.defaultRows,
+      state: "ready",
+      createdAtMs: now,
+      lastActiveAtMs: now,
+      attachments: new Map(),
+      nextSpawnVersion: 1,
+      workspaceType: input.workspaceType,
+      workspacePath: input.workspacePath,
+      branchName: input.branchName,
+      lifecycleState: DEFAULT_SESSION_LIFECYCLE_STATE,
+      lifecycleUpdatedAtMs: now,
+    };
+
+    this.sessions.set(key, session);
+    return this.toMetadata(session);
+  }
+
+  private adoptTrackedSession(
+    project: ProjectRegistryEntry,
+    input: {
+      sessionId: string;
+      workspaceType: SessionWorkspaceType;
+      workspacePath: string;
+      branchName: string | null;
+    },
+  ): SessionMetadata {
+    const key = this.sessionKey(project.id, input.sessionId);
+    const tmuxSessionName = sessionTmuxName(project.id, input.sessionId);
+    if (!this.tmuxSessionExists(tmuxSessionName)) {
+      throw new SessionManagerError(
+        `Unable to adopt tmux session '${input.sessionId}': session is not running`,
+        404,
+        "SESSION_NOT_FOUND",
       );
     }
 

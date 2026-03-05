@@ -6,6 +6,9 @@ import {
   type CreateSessionResult,
   TerminalSessionManager,
   type CreateSessionRequest,
+  type ImportWorktreeSessionsRequest,
+  type ListImportWorktreeCandidatesResult,
+  type ImportWorktreeSessionsResult,
   type ProjectMetadata,
   type ResolveWorktreeHookDecisionRequest,
   type ResolveWorktreeHookDecisionResult,
@@ -117,6 +120,62 @@ class FakeSessionManager implements SessionManagerLike {
 
   listSessions(projectId: string): SessionMetadata[] {
     return [...this.sessions.values()].filter((session) => session.projectId === projectId);
+  }
+
+  listImportWorktreeCandidates(projectId: string): ListImportWorktreeCandidatesResult {
+    const project = this.projects.get(projectId);
+    if (!project) {
+      throw new Error("project missing");
+    }
+
+    return {
+      candidates: [
+        {
+          workspacePath: `/tmp/worktree/importable-1`,
+          branchName: "importable-1",
+          status: "importable",
+        },
+        {
+          workspacePath: `${project.path}-main`,
+          branchName: "main",
+          status: "main_worktree",
+        },
+      ],
+    };
+  }
+
+  importWorktreeSessions(projectId: string, request?: ImportWorktreeSessionsRequest): ImportWorktreeSessionsResult {
+    const project = this.projects.get(projectId);
+    if (!project) {
+      throw new Error("project missing");
+    }
+
+    const requested = new Set((request?.workspacePaths ?? []).map((value) => value.trim()).filter(Boolean));
+    const shouldImport = requested.size === 0 || requested.has("/tmp/worktree/importable-1");
+    if (!shouldImport) {
+      return {
+        imported: [],
+        skipped: [],
+        failed: [],
+      };
+    }
+
+    const importedSession = this.createSession(projectId, {
+      mode: "worktree",
+      branchName: `imported-${this.sessions.size + 1}`,
+    }).session;
+
+    return {
+      imported: [importedSession],
+      skipped: [
+        {
+          workspacePath: `${project.path}-main`,
+          branchName: "main",
+          reason: "main_worktree",
+        },
+      ],
+      failed: [],
+    };
   }
 
   createSession(projectId: string, request?: CreateSessionRequest): CreateSessionResult {
@@ -304,6 +363,27 @@ describe("server config routes and websocket", () => {
     expect(createWorktreePayload.session?.id).toBe("feature/testing");
     expect(createWorktreePayload.hook?.command).toBe("echo fake-hook");
     expect(createWorktreePayload.hook?.succeeded).toBe(true);
+
+    const importWorktreeCandidatesResponse = (routes["/api/projects/:projectId/sessions/import-worktrees"] as {
+      GET: (req: Bun.BunRequest<"/api/projects/:projectId/sessions/import-worktrees">) => Response;
+    }).GET(makeRequest<"/api/projects/:projectId/sessions/import-worktrees">({ projectId: "p1" }));
+    expect(importWorktreeCandidatesResponse.status).toBe(200);
+    const importWorktreeCandidatesPayload = (await importWorktreeCandidatesResponse.json()) as ListImportWorktreeCandidatesResult;
+    expect(importWorktreeCandidatesPayload.candidates).toHaveLength(2);
+
+    const importWorktreesResponse = await (routes["/api/projects/:projectId/sessions/import-worktrees"] as {
+      POST: (req: Bun.BunRequest<"/api/projects/:projectId/sessions/import-worktrees">) => Promise<Response>;
+    }).POST(
+      makeRequest<"/api/projects/:projectId/sessions/import-worktrees">(
+        { projectId: "p1" },
+        { workspacePaths: ["/tmp/worktree/importable-1"] },
+      ),
+    );
+    expect(importWorktreesResponse.status).toBe(200);
+    const importWorktreesPayload = (await importWorktreesResponse.json()) as ImportWorktreeSessionsResult;
+    expect(importWorktreesPayload.imported).toHaveLength(1);
+    expect(importWorktreesPayload.skipped).toHaveLength(1);
+    expect(importWorktreesPayload.failed).toHaveLength(0);
 
     manager.pendingHookFailures.set("hook-token-abort", {
       projectId: "p1",

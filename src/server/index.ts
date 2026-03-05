@@ -3,6 +3,9 @@ import { serializeMessage, type ServerMessage } from "../shared/protocol";
 import {
   type CreateSessionResult,
   type CreateSessionRequest,
+  type ImportWorktreeSessionsRequest,
+  type ListImportWorktreeCandidatesResult,
+  type ImportWorktreeSessionsResult,
   type ProjectMetadata,
   type ResolveWorktreeHookDecisionRequest,
   type ResolveWorktreeHookDecisionResult,
@@ -67,6 +70,8 @@ export interface SessionManagerLike {
   deleteProject(projectId: string): boolean;
   getProject(projectId: string): ProjectMetadata | null;
   listSessions(projectId: string): SessionMetadata[];
+  listImportWorktreeCandidates(projectId: string): ListImportWorktreeCandidatesResult;
+  importWorktreeSessions(projectId: string, request?: ImportWorktreeSessionsRequest): ImportWorktreeSessionsResult;
   createSession(projectId: string, request?: CreateSessionRequest): CreateSessionResult;
   resolveWorktreeHookDecision(projectId: string, request: ResolveWorktreeHookDecisionRequest): ResolveWorktreeHookDecisionResult;
   updateSessionLifecycleState(projectId: string, sessionId: string, input: UpdateSessionLifecycleRequest): SessionMetadata;
@@ -478,6 +483,31 @@ export function createServerConfig(
 
             const created = manager.createSession(req.params.projectId, request);
             return Response.json(created, { status: 201 });
+          } catch (error) {
+            return errorResponse(error);
+          }
+        },
+      },
+      "/api/projects/:projectId/sessions/import-worktrees": {
+        GET: (req: Bun.BunRequest<"/api/projects/:projectId/sessions/import-worktrees">) => {
+          try {
+            return Response.json(manager.listImportWorktreeCandidates(req.params.projectId));
+          } catch (error) {
+            return errorResponse(error);
+          }
+        },
+        POST: async (req: Bun.BunRequest<"/api/projects/:projectId/sessions/import-worktrees">) => {
+          try {
+            const body = (await req.json().catch(() => ({}))) as {
+              workspacePaths?: unknown;
+            };
+
+            const request: ImportWorktreeSessionsRequest = {
+              workspacePaths: Array.isArray(body.workspacePaths)
+                ? body.workspacePaths.filter((value): value is string => typeof value === "string")
+                : undefined,
+            };
+            return Response.json(manager.importWorktreeSessions(req.params.projectId, request));
           } catch (error) {
             return errorResponse(error);
           }

@@ -12,6 +12,7 @@ Web terminal app powered by Bun PTY + zsh on the backend and TanStack React + xt
 - Deleting a project from the UI deletes all sessions in that project.
 - Projects can optionally enable git worktree mode.
 - In worktree mode, you can create sessions either in the main project root or in a new worktree branch.
+- You can manually import existing linked git worktrees via a selection dialog.
 - Worktree-enabled projects can define an optional post-create hook command + timeout.
 - If a hook fails, the UI shows hook stdout/stderr and lets you abort cleanup or continue session creation.
 - Hook toasts include a "View output" action when stdout/stderr is present.

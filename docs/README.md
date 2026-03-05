@@ -44,7 +44,7 @@ File: `src/server/terminal-session.ts`
 Responsibilities:
 
 - Project CRUD surface used by API layer (`listProjects`, `selectProject`, `updateProject`, `deleteProject`)
-- Project-scoped session lifecycle (`createSession`, `listSessions`, `updateSessionLifecycleState`, `deleteSession`)
+- Project-scoped session lifecycle (`createSession`, `importWorktreeSessions`, `listSessions`, `updateSessionLifecycleState`, `deleteSession`)
 - WebSocket client attach/detach and message handling
 - tmux reconciliation and availability/error management
 - git worktree creation/removal for worktree-mode sessions
@@ -54,6 +54,7 @@ Notable behavior:
 - Session names are unique per project
 - Same session name can exist in different projects
 - Worktree sessions use branch name as session ID
+- Existing linked worktrees can be imported manually as worktree sessions via a selection dialog
 - Optional per-project post-create hook runs in the new worktree before session creation
 - Hook failures pause session creation and require an explicit user decision (abort cleanup or continue)
 - Internal tmux names are derived from `<projectId>__<sessionId>` with sanitization/hash for branch-style IDs
@@ -133,6 +134,15 @@ Validation rules for selection:
   - Worktree session: `{ mode: "worktree", branchName }`
   - Success response: `{ session, hook }`
   - `hook` is `null` when no hook command runs; otherwise includes command, stdout, stderr, exit code, timeout, and success status
+- `GET /api/projects/:projectId/sessions/import-worktrees`
+  - Lists candidate worktrees from `git worktree list --porcelain`
+  - Response shape: `{ candidates: [{ workspacePath, branchName, status }] }`
+  - `status` is one of: `importable`, `main_worktree`, `detached_head`, `session_exists`
+- `POST /api/projects/:projectId/sessions/import-worktrees`
+  - Imports selected worktrees with optional `{ workspacePaths }`
+  - Omitting `workspacePaths` imports all importable candidates
+  - Response shape: `{ imported, skipped, failed }`
+  - `skipped[].reason` is one of: `main_worktree`, `detached_head`, `session_exists`
 - `POST /api/projects/:projectId/sessions/worktree-hook-decision`
   - Resolve failed hook with `{ decisionToken, decision }`
   - `decision` is `"abort"` (cleanup worktree+branch) or `"continue"` (create tmux session anyway)
@@ -182,6 +192,7 @@ Responsibilities:
   - new project
   - delete project
   - new session (auto/custom)
+  - import existing worktrees (opens selection dialog)
   - delete session
   - reconnect
   - set session lifecycle state (`planning`, `exploration`, `implementing`, `in review`, `submitted PR`, `merged`, `blocked`, `paused`)
@@ -208,6 +219,7 @@ Session creation menu behavior:
 
 - Always offers main-session creation (auto/custom name)
 - For worktree-enabled projects, also offers create in a new worktree (manual branch name)
+- Also offers manual import of existing linked worktrees for the selected project (opens selection dialog)
 
 ### 2. TerminalPane
 
@@ -248,6 +260,8 @@ Worktree mode commands:
 
 - Create worktree session from current project HEAD:
   - `git -C <project.path> worktree add -b <branch> <worktreePath>`
+- Discover existing linked worktrees for import:
+  - `git -C <project.path> worktree list --porcelain`
 - Delete worktree session resources:
   - `git -C <project.path> worktree remove <worktreePath>`
   - `git -C <project.path> branch -d <branch>`

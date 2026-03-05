@@ -11,6 +11,7 @@ export type TerminalActionId =
   | "project.delete.current"
   | "session.new.auto"
   | "session.new.custom"
+  | "session.import.worktrees"
   | "session.delete.current"
   | "session.reconnect"
   | SessionLifecycleActionId
@@ -70,6 +71,7 @@ export interface TerminalActionContext {
   pending: {
     pickProject: boolean;
     createSession: boolean;
+    importWorktrees: boolean;
     deleteSession: boolean;
     deleteProject: boolean;
     updateSessionLifecycle: boolean;
@@ -80,6 +82,7 @@ export interface TerminalActionHandlers {
   pickProject: () => void | Promise<void>;
   createSessionAuto: () => void;
   createSessionCustom: () => void;
+  importWorktrees: () => void;
   deleteProject: (projectId: string) => void;
   deleteSession: (request: { projectId: string; sessionId: string }) => void;
   reconnectSession: () => void;
@@ -228,6 +231,26 @@ export const TERMINAL_ACTIONS: TerminalActionDefinition[] = [
     },
     run: (_context, handlers) => {
       handlers.createSessionCustom();
+    },
+  },
+  {
+    id: "session.import.worktrees",
+    label: "Import Existing Worktrees",
+    description: "Create sessions from existing linked git worktrees in the selected project.",
+    group: "Session",
+    icon: "refresh",
+    keywords: ["session", "worktree", "import", "git", "discover", "sync"],
+    getAvailability: (context) => {
+      if (!context.selectedProjectId) {
+        return { enabled: false, disabledReason: "Select a project first" };
+      }
+      if (context.pending.importWorktrees) {
+        return { enabled: false, disabledReason: "Worktree import already in progress" };
+      }
+      return { enabled: true };
+    },
+    run: (_context, handlers) => {
+      handlers.importWorktrees();
     },
   },
   {

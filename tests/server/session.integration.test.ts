@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync, rmSync } from "node:fs";
 
 import { isSessionManagerError, TerminalSessionManager } from "../../src/server/terminal-session";
 import type { ServerMessage } from "../../src/shared/protocol";
@@ -573,6 +573,159 @@ describe("TerminalSessionManager (tmux, projects)", () => {
     const branchLookup = runGit(repoPath, ["branch", "--list", branchName]);
     expect(branchLookup.exitCode).toBe(0);
     expect(branchLookup.stdout).toBe("");
+  });
+
+  test("imports existing branch-backed worktrees as sessions", () => {
+    const context = createContext("worktree-import-existing");
+    if (!context.manager.isTmuxAvailable() || !isGitAvailable()) {
+      return;
+    }
+
+    const repoPath = createGitProjectPath("worktree-import-existing-repo");
+    context.projectPaths.push(repoPath);
+
+    const externalWorktreePath = `/tmp/berm-existing-worktree-${uniqueSuffix()}`;
+    context.projectPaths.push(externalWorktreePath);
+
+    const project = context.manager.selectProject(repoPath);
+    const branchName = `import-existing-${uniqueSuffix()}`;
+    const addWorktreeResult = runGit(repoPath, ["worktree", "add", "-b", branchName, externalWorktreePath]);
+    expect(addWorktreeResult.exitCode).toBe(0);
+
+    const imported = context.manager.importWorktreeSessions(project.id);
+    if (
+      imported.failed.some(
+        (entry) => entry.code === "TMUX_UNAVAILABLE" || entry.code === "SESSION_CREATE_FAILED",
+      )
+    ) {
+      return;
+    }
+    expect(imported.imported).toHaveLength(1);
+    expect(imported.imported[0]?.id).toBe(branchName);
+    expect(imported.imported[0]?.workspaceType).toBe("worktree");
+    expect(imported.imported[0]?.workspacePath).toBe(realpathSync(externalWorktreePath));
+    expect(imported.skipped.some((entry) => entry.reason === "main_worktree")).toBe(true);
+
+    const listed = context.manager.listSessions(project.id);
+    expect(listed.some((session) => session.id === branchName)).toBe(true);
+
+    const reimported = context.manager.importWorktreeSessions(project.id);
+    expect(reimported.imported).toHaveLength(0);
+    expect(reimported.skipped.some((entry) => entry.reason === "session_exists" && entry.branchName === branchName)).toBe(
+      true,
+    );
+
+    const deleted = context.manager.deleteSession(project.id, branchName);
+    expect(deleted).toBe(true);
+    expect(existsSync(externalWorktreePath)).toBe(false);
+  });
+
+  test("skips detached worktrees during import", () => {
+    const context = createContext("worktree-import-detached");
+    if (!context.manager.isTmuxAvailable() || !isGitAvailable()) {
+      return;
+    }
+
+    const repoPath = createGitProjectPath("worktree-import-detached-repo");
+    context.projectPaths.push(repoPath);
+
+    const detachedWorktreePath = `/tmp/berm-detached-worktree-${uniqueSuffix()}`;
+    context.projectPaths.push(detachedWorktreePath);
+
+    const project = context.manager.selectProject(repoPath);
+    const addDetachedResult = runGit(repoPath, ["worktree", "add", "--detach", detachedWorktreePath, "HEAD"]);
+    expect(addDetachedResult.exitCode).toBe(0);
+
+    const imported = context.manager.importWorktreeSessions(project.id);
+    expect(imported.imported).toHaveLength(0);
+    expect(imported.skipped.some((entry) => entry.reason === "detached_head")).toBe(true);
+    expect(imported.skipped.some((entry) => entry.reason === "main_worktree")).toBe(true);
+  });
+
+  test("imports only selected worktrees when workspacePaths are provided", () => {
+    const context = createContext("worktree-import-selective");
+    if (!context.manager.isTmuxAvailable() || !isGitAvailable()) {
+      return;
+    }
+
+    const repoPath = createGitProjectPath("worktree-import-selective-repo");
+    context.projectPaths.push(repoPath);
+
+    const firstWorktreePath = `/tmp/berm-selective-worktree-a-${uniqueSuffix()}`;
+    const secondWorktreePath = `/tmp/berm-selective-worktree-b-${uniqueSuffix()}`;
+    context.projectPaths.push(firstWorktreePath, secondWorktreePath);
+
+    const project = context.manager.selectProject(repoPath);
+    const firstBranch = `selective-a-${uniqueSuffix()}`;
+    const secondBranch = `selective-b-${uniqueSuffix()}`;
+    const firstAdd = runGit(repoPath, ["worktree", "add", "-b", firstBranch, firstWorktreePath]);
+    const secondAdd = runGit(repoPath, ["worktree", "add", "-b", secondBranch, secondWorktreePath]);
+    expect(firstAdd.exitCode).toBe(0);
+    expect(secondAdd.exitCode).toBe(0);
+
+    const imported = context.manager.importWorktreeSessions(project.id, {
+      workspacePaths: [firstWorktreePath],
+    });
+    if (
+      imported.failed.some(
+        (entry) => entry.code === "TMUX_UNAVAILABLE" || entry.code === "SESSION_CREATE_FAILED",
+      )
+    ) {
+      return;
+    }
+
+    expect(imported.imported).toHaveLength(1);
+    expect(imported.imported[0]?.id).toBe(firstBranch);
+    expect(context.manager.hasSession(project.id, firstBranch)).toBe(true);
+    expect(context.manager.hasSession(project.id, secondBranch)).toBe(false);
+
+    context.manager.deleteSession(project.id, firstBranch);
+    runGit(repoPath, ["worktree", "remove", secondWorktreePath]);
+    runGit(repoPath, ["branch", "-d", secondBranch]);
+  });
+
+  test("adopts existing tmux session during import when registry entry is missing", () => {
+    const context = createContext("worktree-import-adopt");
+    if (!context.manager.isTmuxAvailable() || !isGitAvailable()) {
+      return;
+    }
+
+    const repoPath = createGitProjectPath("worktree-import-adopt-repo");
+    context.projectPaths.push(repoPath);
+
+    const worktreePath = `/tmp/berm-adopt-worktree-${uniqueSuffix()}`;
+    context.projectPaths.push(worktreePath);
+
+    const project = context.manager.selectProject(repoPath);
+    const branchName = `adopt-${uniqueSuffix()}`;
+    const addWorktreeResult = runGit(repoPath, ["worktree", "add", "-b", branchName, worktreePath]);
+    expect(addWorktreeResult.exitCode).toBe(0);
+
+    const tmuxName = `${project.id}__${branchName}`;
+    const manualTmuxCreate = Bun.spawnSync(
+      ["tmux", "-L", context.socketName, "new-session", "-d", "-s", tmuxName, "-c", worktreePath, "zsh"],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    expect(manualTmuxCreate.exitCode).toBe(0);
+
+    const candidates = context.manager.listImportWorktreeCandidates(project.id);
+    const candidate = candidates.candidates.find((entry) => entry.workspacePath === realpathSync(worktreePath));
+    expect(candidate?.status).toBe("importable");
+
+    const imported = context.manager.importWorktreeSessions(project.id, { workspacePaths: [worktreePath] });
+    if (
+      imported.failed.some(
+        (entry) => entry.code === "TMUX_UNAVAILABLE" || entry.code === "SESSION_CREATE_FAILED",
+      )
+    ) {
+      return;
+    }
+    expect(imported.imported).toHaveLength(1);
+    expect(imported.imported[0]?.id).toBe(branchName);
+    expect(context.manager.hasSession(project.id, branchName)).toBe(true);
+
+    const deleted = context.manager.deleteSession(project.id, branchName);
+    expect(deleted).toBe(true);
   });
 
   test("rejects worktree session creation when branch already exists", () => {

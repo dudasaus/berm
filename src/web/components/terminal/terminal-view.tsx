@@ -197,6 +197,44 @@ type CreateSessionResponse = {
   hook: WorktreeHookExecutionDetails | null;
 };
 
+type ImportWorktreeSkipReason = "main_worktree" | "detached_head" | "session_exists";
+type ImportWorktreeCandidateStatus = "importable" | ImportWorktreeSkipReason;
+
+type ImportWorktreeCandidate = {
+  workspacePath: string;
+  branchName: string | null;
+  status: ImportWorktreeCandidateStatus;
+};
+
+type ImportWorktreeCandidatesResponse = {
+  candidates: ImportWorktreeCandidate[];
+};
+
+type ImportWorktreeResponse = {
+  imported: SessionMetadata[];
+  skipped: Array<{
+    workspacePath: string;
+    branchName: string | null;
+    reason: ImportWorktreeSkipReason;
+  }>;
+  failed: Array<{
+    workspacePath: string;
+    branchName: string | null;
+    code: string;
+    error: string;
+  }>;
+};
+
+type ImportWorktreeDialogState = {
+  projectId: string;
+  candidates: Array<{
+    workspacePath: string;
+    branchName: string;
+  }>;
+  selectedWorkspacePaths: string[];
+  unavailableCounts: Record<ImportWorktreeSkipReason, number>;
+};
+
 type WorktreeHookFailurePayload = {
   code: "WORKTREE_HOOK_FAILED";
   error: string;
@@ -376,6 +414,59 @@ async function createSession(
   return {
     session: payload as SessionMetadata,
     hook: null,
+  };
+}
+
+async function fetchImportWorktreeCandidates(projectId: string): Promise<ImportWorktreeCandidatesResponse> {
+  const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/sessions/import-worktrees`);
+
+  const payload = (await response.json().catch(() => ({}))) as unknown;
+  if (!response.ok) {
+    const errorPayload =
+      payload && typeof payload === "object" ? (payload as Record<string, unknown>) : {};
+    const message =
+      typeof errorPayload.error === "string"
+        ? errorPayload.error
+        : `import worktree candidates failed with ${response.status}`;
+    throw new ApiRequestError(message, response.status, errorPayload);
+  }
+
+  const result = payload as Partial<ImportWorktreeCandidatesResponse>;
+  return {
+    candidates: Array.isArray(result.candidates) ? result.candidates : [],
+  };
+}
+
+async function importWorktreeSessions(request: {
+  projectId: string;
+  workspacePaths: string[];
+}): Promise<ImportWorktreeResponse> {
+  const response = await fetch(`/api/projects/${encodeURIComponent(request.projectId)}/sessions/import-worktrees`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      workspacePaths: request.workspacePaths,
+    }),
+  });
+
+  const payload = (await response.json().catch(() => ({}))) as unknown;
+  if (!response.ok) {
+    const errorPayload =
+      payload && typeof payload === "object" ? (payload as Record<string, unknown>) : {};
+    const message =
+      typeof errorPayload.error === "string"
+        ? errorPayload.error
+        : `import worktrees failed with ${response.status}`;
+    throw new ApiRequestError(message, response.status, errorPayload);
+  }
+
+  const result = payload as Partial<ImportWorktreeResponse>;
+  return {
+    imported: Array.isArray(result.imported) ? result.imported : [],
+    skipped: Array.isArray(result.skipped) ? result.skipped : [],
+    failed: Array.isArray(result.failed) ? result.failed : [],
   };
 }
 
@@ -941,6 +1032,7 @@ export function TerminalView() {
   const [projectSettingsParentPath, setProjectSettingsParentPath] = useState("");
   const [projectSettingsHookCommand, setProjectSettingsHookCommand] = useState("");
   const [projectSettingsHookTimeoutMs, setProjectSettingsHookTimeoutMs] = useState("15000");
+  const [importWorktreeDialog, setImportWorktreeDialog] = useState<ImportWorktreeDialogState | null>(null);
   const [worktreeHookFailure, setWorktreeHookFailure] = useState<WorktreeHookFailurePayload | null>(null);
   const [hookOutputDialog, setHookOutputDialog] = useState<HookOutputDialogState | null>(null);
   const [isWideMode, setIsWideMode] = useState(() => readStoredWideMode());
@@ -1079,6 +1171,18 @@ export function TerminalView() {
     }
     setFocusedWorkspaceSlot(null);
     setActiveWorkspaceSessionId(null);
+  }, [selectedProjectId]);
+
+  useEffect(() => {
+    setImportWorktreeDialog((current) => {
+      if (!current) {
+        return current;
+      }
+      if (!selectedProjectId || current.projectId !== selectedProjectId) {
+        return null;
+      }
+      return current;
+    });
   }, [selectedProjectId]);
 
   useEffect(() => {
@@ -1296,6 +1400,127 @@ export function TerminalView() {
         }
       }
 
+      toast.error(error instanceof Error ? error.message : String(error));
+    },
+  });
+
+  const importWorktreeCandidatesMutation = useMutation({
+    mutationFn: fetchImportWorktreeCandidates,
+    onSuccess: (result, projectId) => {
+      const unavailableCounts = result.candidates.reduce<Record<ImportWorktreeSkipReason, number>>(
+        (counts, candidate) => {
+          if (candidate.status !== "importable") {
+            counts[candidate.status] += 1;
+          }
+          return counts;
+        },
+        {
+          main_worktree: 0,
+          detached_head: 0,
+          session_exists: 0,
+        },
+      );
+
+      const importable = result.candidates
+        .filter(
+          (candidate): candidate is ImportWorktreeCandidate & { branchName: string } =>
+            candidate.status === "importable" &&
+            typeof candidate.branchName === "string" &&
+            candidate.branchName.trim().length > 0,
+        )
+        .map((candidate) => ({
+          workspacePath: candidate.workspacePath,
+          branchName: candidate.branchName,
+        }));
+
+      if (importable.length === 0) {
+        const detailParts: string[] = [];
+        if (unavailableCounts.session_exists > 0) {
+          detailParts.push(`${unavailableCounts.session_exists} already tracked`);
+        }
+        if (unavailableCounts.detached_head > 0) {
+          detailParts.push(`${unavailableCounts.detached_head} detached`);
+        }
+        if (unavailableCounts.main_worktree > 0) {
+          detailParts.push(`${unavailableCounts.main_worktree} main`);
+        }
+
+        toast.message("No importable worktrees found", {
+          description: detailParts.length > 0 ? detailParts.join(" · ") : undefined,
+        });
+        return;
+      }
+
+      setImportWorktreeDialog({
+        projectId,
+        candidates: importable,
+        selectedWorkspacePaths: importable.map((candidate) => candidate.workspacePath),
+        unavailableCounts,
+      });
+    },
+    onError: (error) => {
+      toast.error(error instanceof Error ? error.message : String(error));
+    },
+  });
+
+  const importWorktreeSessionsMutation = useMutation({
+    mutationFn: importWorktreeSessions,
+    onSuccess: (result, request) => {
+      setImportWorktreeDialog(null);
+
+      if (result.imported.length > 0) {
+        const latestImported = result.imported[result.imported.length - 1];
+        if (latestImported) {
+          setSelectedSessionId(latestImported.id);
+        }
+      }
+
+      const skippedReasonCounts = result.skipped.reduce<Record<ImportWorktreeSkipReason, number>>(
+        (counts, entry) => {
+          counts[entry.reason] += 1;
+          return counts;
+        },
+        {
+          main_worktree: 0,
+          detached_head: 0,
+          session_exists: 0,
+        },
+      );
+
+      const summaryParts = [
+        `${result.imported.length} imported`,
+        `${result.skipped.length} skipped`,
+        `${result.failed.length} failed`,
+      ];
+      const detailParts: string[] = [];
+      if (skippedReasonCounts.session_exists > 0) {
+        detailParts.push(`${skippedReasonCounts.session_exists} already tracked`);
+      }
+      if (skippedReasonCounts.detached_head > 0) {
+        detailParts.push(`${skippedReasonCounts.detached_head} detached`);
+      }
+      if (skippedReasonCounts.main_worktree > 0) {
+        detailParts.push(`${skippedReasonCounts.main_worktree} main`);
+      }
+
+      if (result.failed.length > 0) {
+        toast.warning(`Imported worktrees: ${summaryParts.join(", ")}`, {
+          description: detailParts.length > 0 ? detailParts.join(" · ") : undefined,
+        });
+      } else if (result.imported.length > 0) {
+        toast.success(`Imported worktrees: ${summaryParts.join(", ")}`, {
+          description: detailParts.length > 0 ? detailParts.join(" · ") : undefined,
+        });
+      } else {
+        toast.message(`Imported worktrees: ${summaryParts.join(", ")}`, {
+          description: detailParts.length > 0 ? detailParts.join(" · ") : undefined,
+        });
+      }
+
+      void queryClient.invalidateQueries({ queryKey: ["sessions", request.projectId] });
+      void queryClient.invalidateQueries({ queryKey: ["sessions-github-sync", request.projectId] });
+    },
+    onError: (error) => {
       toast.error(error instanceof Error ? error.message : String(error));
     },
   });
@@ -1844,6 +2069,78 @@ export function TerminalView() {
     createSessionMutation.mutate({ projectId: selectedProjectId, mode: "worktree", branchName });
   };
 
+  const handleImportWorktrees = () => {
+    if (!selectedProjectId) {
+      toast.warning("Select a project first");
+      return;
+    }
+
+    if (importWorktreeDialog) {
+      return;
+    }
+
+    importWorktreeCandidatesMutation.mutate(selectedProjectId);
+  };
+
+  const toggleImportWorktreeSelection = (workspacePath: string) => {
+    setImportWorktreeDialog((current) => {
+      if (!current) {
+        return current;
+      }
+
+      const selected = current.selectedWorkspacePaths.includes(workspacePath)
+        ? current.selectedWorkspacePaths.filter((value) => value !== workspacePath)
+        : [...current.selectedWorkspacePaths, workspacePath];
+
+      return {
+        ...current,
+        selectedWorkspacePaths: selected,
+      };
+    });
+  };
+
+  const handleImportWorktreeSelectionAll = () => {
+    setImportWorktreeDialog((current) => {
+      if (!current) {
+        return current;
+      }
+
+      return {
+        ...current,
+        selectedWorkspacePaths: current.candidates.map((candidate) => candidate.workspacePath),
+      };
+    });
+  };
+
+  const handleImportWorktreeSelectionNone = () => {
+    setImportWorktreeDialog((current) => {
+      if (!current) {
+        return current;
+      }
+
+      return {
+        ...current,
+        selectedWorkspacePaths: [],
+      };
+    });
+  };
+
+  const handleConfirmImportWorktrees = () => {
+    if (!importWorktreeDialog) {
+      return;
+    }
+
+    if (importWorktreeDialog.selectedWorkspacePaths.length === 0) {
+      toast.warning("Select at least one worktree to import");
+      return;
+    }
+
+    importWorktreeSessionsMutation.mutate({
+      projectId: importWorktreeDialog.projectId,
+      workspacePaths: importWorktreeDialog.selectedWorkspacePaths,
+    });
+  };
+
   const deleteSessionById = (request: { projectId: string; sessionId: string }) => {
     deleteSessionMutation.mutate(request);
   };
@@ -2071,6 +2368,10 @@ export function TerminalView() {
       pending: {
         pickProject: selectProjectMutation.isPending,
         createSession: createSessionMutation.isPending,
+        importWorktrees:
+          importWorktreeDialog !== null ||
+          importWorktreeCandidatesMutation.isPending ||
+          importWorktreeSessionsMutation.isPending,
         deleteProject: deleteProjectMutation.isPending,
         deleteSession: deleteSessionMutation.isPending,
         updateSessionLifecycle: updateSessionLifecycleMutation.isPending,
@@ -2078,6 +2379,9 @@ export function TerminalView() {
     }),
     [
       createSessionMutation.isPending,
+      importWorktreeDialog,
+      importWorktreeCandidatesMutation.isPending,
+      importWorktreeSessionsMutation.isPending,
       deleteProjectMutation.isPending,
       deleteSessionMutation.isPending,
       isHeaderVisible,
@@ -2108,6 +2412,7 @@ export function TerminalView() {
     },
     createSessionAuto: handleCreateMainAutoSession,
     createSessionCustom: handleCreateMainNamedSession,
+    importWorktrees: handleImportWorktrees,
     deleteProject: deleteProjectById,
     deleteSession: deleteSessionById,
     reconnectSession: reconnectSelectedSession,
@@ -2430,6 +2735,15 @@ export function TerminalView() {
                                 In new worktree branch
                               </DropdownMenuItem>
                             ) : null}
+                            <DropdownMenuSeparator />
+                            <DropdownMenuItem
+                              onSelect={() => {
+                                runAction("session.import.worktrees", { source: "dropdown" });
+                              }}
+                              disabled={!getActionAvailability("session.import.worktrees", { source: "dropdown" }).enabled}
+                            >
+                              Import existing worktrees
+                            </DropdownMenuItem>
                           </DropdownMenuContent>
                         </DropdownMenu>
                       </div>
@@ -3160,6 +3474,107 @@ export function TerminalView() {
         }}
         onConfirm={handleConfirmPendingAction}
       />
+
+      {importWorktreeDialog ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4">
+          <Card className="w-full max-w-2xl border-border/80 bg-card shadow-xl">
+            <CardHeader className="space-y-1 pb-3">
+              <CardTitle className="text-base">Import Existing Worktrees</CardTitle>
+              <CardDescription className="font-mono text-xs">
+                Choose which existing linked worktrees to import as sessions.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="flex items-center justify-between gap-2">
+                <p className="font-mono text-[11px] text-muted-foreground">
+                  {importWorktreeDialog.candidates.length} available · {importWorktreeDialog.selectedWorkspacePaths.length} selected
+                </p>
+                <div className="flex items-center gap-2">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    onClick={handleImportWorktreeSelectionAll}
+                    disabled={importWorktreeSessionsMutation.isPending}
+                  >
+                    Select all
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    onClick={handleImportWorktreeSelectionNone}
+                    disabled={importWorktreeSessionsMutation.isPending}
+                  >
+                    Clear
+                  </Button>
+                </div>
+              </div>
+
+              <div className="max-h-72 space-y-2 overflow-auto rounded-md border border-border bg-background p-2">
+                {importWorktreeDialog.candidates.map((candidate) => {
+                  const checked = importWorktreeDialog.selectedWorkspacePaths.includes(candidate.workspacePath);
+                  return (
+                    <label
+                      key={candidate.workspacePath}
+                      className="flex cursor-pointer items-start gap-2 rounded-sm border border-border/60 p-2 hover:border-border"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => {
+                          toggleImportWorktreeSelection(candidate.workspacePath);
+                        }}
+                        disabled={importWorktreeSessionsMutation.isPending}
+                      />
+                      <span className="min-w-0">
+                        <span className="block truncate font-mono text-xs font-semibold text-foreground">
+                          {candidate.branchName}
+                        </span>
+                        <span className="block truncate font-mono text-[11px] text-muted-foreground">
+                          {candidate.workspacePath}
+                        </span>
+                      </span>
+                    </label>
+                  );
+                })}
+              </div>
+
+              {(importWorktreeDialog.unavailableCounts.session_exists > 0 ||
+                importWorktreeDialog.unavailableCounts.detached_head > 0 ||
+                importWorktreeDialog.unavailableCounts.main_worktree > 0) ? (
+                <p className="font-mono text-[11px] text-muted-foreground">
+                  Not shown: {importWorktreeDialog.unavailableCounts.session_exists} already tracked ·{" "}
+                  {importWorktreeDialog.unavailableCounts.detached_head} detached ·{" "}
+                  {importWorktreeDialog.unavailableCounts.main_worktree} main
+                </p>
+              ) : null}
+
+              <div className="flex justify-end gap-2">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => {
+                    setImportWorktreeDialog(null);
+                  }}
+                  disabled={importWorktreeSessionsMutation.isPending}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  onClick={handleConfirmImportWorktrees}
+                  disabled={importWorktreeSessionsMutation.isPending}
+                >
+                  Import selected
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      ) : null}
 
       {isProjectSettingsOpen && selectedProject ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4">
