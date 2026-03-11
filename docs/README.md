@@ -33,7 +33,7 @@ Responsibilities:
 
 - Serves frontend app
 - Exposes project/session REST APIs
-- Exposes GitHub PR/CI sync API for session tiles (`gh`-powered)
+- Exposes GitHub PR/CI sync API for session tiles (`gh`-powered, stale-while-revalidate cached)
 - Handles WebSocket upgrades for terminal streams
 - Converts manager errors into structured JSON responses
 
@@ -128,7 +128,8 @@ Validation rules for selection:
 - `GET /api/projects/:projectId/sessions/github-sync`
   - Uses GitHub CLI (`gh`) + local git branch resolution per session workspace
   - Returns PR metadata and CI check summary for each session when available
-  - Response shape: `{ sessions: [{ sessionId, branchName, pr, ci, source, error? }], syncedAt, cached }`
+  - Serves cached data immediately and refreshes stale GitHub data in the background
+  - Response shape: `{ sessions: [{ sessionId, branchName, pr, ci, source, error? }], syncedAt, cached, refreshing }`
 - `POST /api/projects/:projectId/sessions`
   - Main session: `{ mode: "main", name? }`
   - Worktree session: `{ mode: "worktree", branchName }`
@@ -184,6 +185,7 @@ Responsibilities:
 - Supports saving/loading named workspace presets per project
 - Supports cross-project pinned session board for quick switching
 - Renders per-session PR/CI sync badges in session rows and workspace slot headers
+- Shows live activity indicators for session refresh polling and GitHub badge sync work in the header/sidebar
 - Renders workspace slot state badges (`Focused`, `Active`, `Live`) with tooltips
 - Routes default session actions through the active slot session (shown in command palette header)
 - Exposes project actions (pick, enter path, settings, delete)

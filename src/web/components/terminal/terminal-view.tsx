@@ -97,8 +97,33 @@ type WorkspaceBoardEntry = {
   pinnedAt: string;
 };
 
+type BackgroundTaskKey = "sessionRefresh" | "githubSync";
+
+type BackgroundTaskRun = {
+  runId: number;
+  startedAtMs: number;
+};
+
+type BackgroundTaskState = {
+  inFlight: boolean;
+  lastStartedAtMs: number | null;
+  lastFinishedAtMs: number | null;
+  lastDurationMs: number | null;
+  lastOutcome: "success" | "error" | null;
+};
+
 function selectedSessionStorageKey(projectId: string) {
   return `berm.selected-session-id.${projectId}`;
+}
+
+function createBackgroundTaskState(): BackgroundTaskState {
+  return {
+    inFlight: false,
+    lastStartedAtMs: null,
+    lastFinishedAtMs: null,
+    lastDurationMs: null,
+    lastOutcome: null,
+  };
 }
 
 function sessionOrderStorageKey(projectId: string) {
@@ -181,6 +206,7 @@ type SessionGitHubSyncResponse = {
   sessions: SessionGitHubSyncItem[];
   syncedAt: string;
   cached: boolean;
+  refreshing: boolean;
 };
 
 type WorktreeHookExecutionDetails = {
@@ -1009,13 +1035,49 @@ function slotsEqual(a: Array<string | null>, b: Array<string | null>): boolean {
   return true;
 }
 
+function formatDurationLabel(durationMs: number | null): string {
+  if (durationMs === null) {
+    return "n/a";
+  }
+
+  if (durationMs < 1_000) {
+    return `${durationMs}ms`;
+  }
+
+  if (durationMs < 10_000) {
+    return `${(durationMs / 1_000).toFixed(1)}s`;
+  }
+
+  return `${Math.round(durationMs / 1_000)}s`;
+}
+
+function formatClockTime(timestampMs: number | null): string {
+  if (timestampMs === null) {
+    return "not yet";
+  }
+
+  return new Date(timestampMs).toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+}
+
 export function TerminalView() {
   const terminalRefs = useRef<Record<string, TerminalPaneHandle | null>>({});
   const commandPreviousFocusRef = useRef<HTMLElement | null>(null);
+  const backgroundTaskRunIdRef = useRef<Record<BackgroundTaskKey, number>>({
+    sessionRefresh: 0,
+    githubSync: 0,
+  });
   const queryClient = useQueryClient();
 
   const [connectionBySessionId, setConnectionBySessionId] = useState<Record<string, TerminalConnectionState>>({});
   const [terminalStateBySessionId, setTerminalStateBySessionId] = useState<Record<string, TerminalStatusState>>({});
+  const [backgroundTaskByKey, setBackgroundTaskByKey] = useState<Record<BackgroundTaskKey, BackgroundTaskState>>(() => ({
+    sessionRefresh: createBackgroundTaskState(),
+    githubSync: createBackgroundTaskState(),
+  }));
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(() => readStoredProjectId());
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [activeWorkspaceSessionId, setActiveWorkspaceSessionId] = useState<string | null>(null);
@@ -1062,6 +1124,44 @@ export function TerminalView() {
     const activeElement = document.activeElement;
     commandPreviousFocusRef.current = activeElement instanceof HTMLElement ? activeElement : null;
   }, []);
+
+  const beginBackgroundTask = useCallback((key: BackgroundTaskKey): BackgroundTaskRun => {
+    const startedAtMs = Date.now();
+    const runId = backgroundTaskRunIdRef.current[key] + 1;
+    backgroundTaskRunIdRef.current[key] = runId;
+
+    setBackgroundTaskByKey((previous) => ({
+      ...previous,
+      [key]: {
+        ...previous[key],
+        inFlight: true,
+        lastStartedAtMs: startedAtMs,
+      },
+    }));
+
+    return { runId, startedAtMs };
+  }, []);
+
+  const finishBackgroundTask = useCallback(
+    (key: BackgroundTaskKey, taskRun: BackgroundTaskRun, outcome: "success" | "error") => {
+      if (backgroundTaskRunIdRef.current[key] !== taskRun.runId) {
+        return;
+      }
+
+      const finishedAtMs = Date.now();
+      setBackgroundTaskByKey((previous) => ({
+        ...previous,
+        [key]: {
+          ...previous[key],
+          inFlight: false,
+          lastFinishedAtMs: finishedAtMs,
+          lastDurationMs: Math.max(0, finishedAtMs - taskRun.startedAtMs),
+          lastOutcome: outcome,
+        },
+      }));
+    },
+    [],
+  );
 
   const restoreCommandFocusTarget = useCallback(() => {
     const target = commandPreviousFocusRef.current;
@@ -1258,28 +1358,53 @@ export function TerminalView() {
     refetchInterval: 5_000,
   });
 
+  const fetchSessionsQuery = useCallback(async () => {
+    if (!selectedProjectId) {
+      return [] as SessionMetadata[];
+    }
+
+    const taskRun = beginBackgroundTask("sessionRefresh");
+    try {
+      const result = await fetchSessions(selectedProjectId);
+      finishBackgroundTask("sessionRefresh", taskRun, "success");
+      return result;
+    } catch (error) {
+      finishBackgroundTask("sessionRefresh", taskRun, "error");
+      throw error;
+    }
+  }, [beginBackgroundTask, finishBackgroundTask, selectedProjectId]);
+
   const sessionsQuery = useQuery({
     queryKey: ["sessions", selectedProjectId],
-    queryFn: async () => {
-      if (!selectedProjectId) {
-        return [] as SessionMetadata[];
-      }
-      return fetchSessions(selectedProjectId);
-    },
+    queryFn: fetchSessionsQuery,
     enabled: Boolean(selectedProjectId),
     refetchInterval: 2_500,
   });
 
+  const fetchSessionGitHubSyncQuery = useCallback(async () => {
+    if (!selectedProjectId) {
+      return { sessions: [], syncedAt: new Date(0).toISOString(), cached: false, refreshing: false } as SessionGitHubSyncResponse;
+    }
+
+    const taskRun = beginBackgroundTask("githubSync");
+    try {
+      const result = await fetchSessionGitHubSync(selectedProjectId);
+      finishBackgroundTask("githubSync", taskRun, "success");
+      return result;
+    } catch (error) {
+      finishBackgroundTask("githubSync", taskRun, "error");
+      throw error;
+    }
+  }, [beginBackgroundTask, finishBackgroundTask, selectedProjectId]);
+
   const sessionGitHubSyncQuery = useQuery({
     queryKey: ["sessions-github-sync", selectedProjectId],
-    queryFn: async () => {
-      if (!selectedProjectId) {
-        return { sessions: [], syncedAt: new Date(0).toISOString(), cached: false } as SessionGitHubSyncResponse;
-      }
-      return fetchSessionGitHubSync(selectedProjectId);
-    },
+    queryFn: fetchSessionGitHubSyncQuery,
     enabled: Boolean(selectedProjectId),
-    refetchInterval: 20_000,
+    refetchInterval: (query) => {
+      const data = query.state.data as SessionGitHubSyncResponse | undefined;
+      return data?.refreshing ? 1_000 : 20_000;
+    },
   });
 
   const selectProjectMutation = useMutation({
@@ -2524,6 +2649,36 @@ export function TerminalView() {
   const mainLayoutClass = isWideMode
     ? "mx-auto flex h-[100dvh] min-h-screen w-full max-w-none flex-col gap-3 px-2 py-3 md:gap-4 md:px-2 md:py-4"
     : "mx-auto flex h-[100dvh] min-h-screen w-full max-w-[1500px] flex-col gap-3 px-3 py-3 md:gap-4 md:px-6 md:py-4";
+  const backgroundTasks = useMemo(
+    () => [
+      {
+        key: "sessionRefresh" as const,
+        label: "Session Refresh",
+        detail: "Polling tmux session state every 2.5s",
+        task: backgroundTaskByKey.sessionRefresh,
+        icon: RefreshCw,
+        cached: false,
+        hasError: sessionsQuery.error !== null,
+      },
+      {
+        key: "githubSync" as const,
+        label: "GitHub Badges",
+        detail: "Refreshing PR and CI status every 20s",
+        task: backgroundTaskByKey.githubSync,
+        icon: GitPullRequest,
+        cached: sessionGitHubSyncQuery.data?.cached === true,
+        hasError: sessionGitHubSyncQuery.error !== null,
+        serverRefreshing: sessionGitHubSyncQuery.data?.refreshing === true,
+      },
+    ],
+    [
+      backgroundTaskByKey,
+      sessionGitHubSyncQuery.data?.cached,
+      sessionGitHubSyncQuery.data?.refreshing,
+      sessionGitHubSyncQuery.error,
+      sessionsQuery.error,
+    ],
+  );
 
   return (
     <TooltipProvider delayDuration={150}>
@@ -2552,6 +2707,70 @@ export function TerminalView() {
               </div>
             </div>
           </header>
+        ) : null}
+
+        {selectedProjectId ? (
+          <section className="grid gap-2 md:grid-cols-2">
+            {backgroundTasks.map((activity) => {
+              const Icon = activity.icon;
+              const isActive = activity.task.inFlight || ("serverRefreshing" in activity && activity.serverRefreshing);
+              const statusVariant = isActive
+                ? "warning"
+                : activity.hasError || activity.task.lastOutcome === "error"
+                  ? "outline"
+                  : "secondary";
+              const statusLabel = isActive
+                ? "running"
+                : activity.hasError || activity.task.lastOutcome === "error"
+                  ? "error"
+                  : activity.task.lastFinishedAtMs
+                    ? "idle"
+                    : "waiting";
+              const summaryText = isActive
+                ? `Started ${formatClockTime(activity.task.lastStartedAtMs)}`
+                : activity.task.lastFinishedAtMs
+                  ? `Last run ${formatDurationLabel(activity.task.lastDurationMs)} at ${formatClockTime(activity.task.lastFinishedAtMs)}`
+                  : "No fetch recorded yet";
+              const detailParts = [activity.detail];
+              if ("serverRefreshing" in activity && activity.serverRefreshing) {
+                detailParts.push("server refresh in progress");
+              } else if (activity.cached) {
+                detailParts.push("cache hit");
+              }
+              const detailText = detailParts.join(" · ");
+
+              return (
+                <div
+                  key={activity.key}
+                  className="rounded-xl border border-border/80 bg-card/65 px-3 py-2.5 shadow-sm backdrop-blur-sm"
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0 space-y-1">
+                      <div className="flex items-center gap-2">
+                        <span
+                          className={`inline-flex h-7 w-7 items-center justify-center rounded-full border border-border/70 ${
+                            isActive ? "bg-amber-500/10 text-amber-200" : "bg-background/70 text-muted-foreground"
+                          }`}
+                        >
+                          <Icon className={`h-3.5 w-3.5 ${isActive ? "animate-spin" : ""}`} />
+                        </span>
+                        <div className="min-w-0">
+                          <p className="font-mono text-[11px] font-semibold uppercase tracking-[0.22em] text-muted-foreground">
+                            {activity.label}
+                          </p>
+                          <p className="font-mono text-xs text-foreground">{summaryText}</p>
+                        </div>
+                      </div>
+                      <p className="font-mono text-[11px] text-muted-foreground">{detailText}</p>
+                    </div>
+                    <Badge variant={statusVariant} className="font-mono uppercase tracking-wide">
+                      {statusLabel}
+                    </Badge>
+                  </div>
+                </div>
+              );
+            })}
+          </section>
         ) : null}
 
         <ResizablePanelGroup
@@ -2745,8 +2964,28 @@ export function TerminalView() {
                               Import existing worktrees
                             </DropdownMenuItem>
                           </DropdownMenuContent>
-                        </DropdownMenu>
+                          </DropdownMenu>
                       </div>
+
+                      {selectedProjectId ? (
+                        <div className="flex flex-wrap items-center gap-1">
+                          <Badge
+                            variant={backgroundTaskByKey.sessionRefresh.inFlight ? "warning" : "outline"}
+                            className="font-mono text-[10px] uppercase tracking-wide"
+                          >
+                            sessions {backgroundTaskByKey.sessionRefresh.inFlight ? "refreshing" : formatDurationLabel(backgroundTaskByKey.sessionRefresh.lastDurationMs)}
+                          </Badge>
+                          <Badge
+                            variant={backgroundTaskByKey.githubSync.inFlight || sessionGitHubSyncQuery.data?.refreshing ? "warning" : "outline"}
+                            className="font-mono text-[10px] uppercase tracking-wide"
+                          >
+                            github{" "}
+                            {backgroundTaskByKey.githubSync.inFlight || sessionGitHubSyncQuery.data?.refreshing
+                              ? "syncing"
+                              : formatDurationLabel(backgroundTaskByKey.githubSync.lastDurationMs)}
+                          </Badge>
+                        </div>
+                      ) : null}
 
                       {!selectedProjectId ? (
                         <div className="rounded-md border border-dashed border-border p-3 text-sm text-muted-foreground">

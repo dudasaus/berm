@@ -53,14 +53,28 @@ type GitHubSessionSyncItem = {
   error?: string;
 };
 
-type GitHubSyncResponse = {
+type GitHubSyncPayload = {
   sessions: GitHubSessionSyncItem[];
   syncedAt: string;
+};
+
+type GitHubSyncResponse = GitHubSyncPayload & {
   cached: boolean;
+  refreshing: boolean;
 };
 
 const GITHUB_SYNC_CACHE_TTL_MS = 15_000;
-const githubSyncCache = new Map<string, { expiresAtMs: number; payload: GitHubSyncResponse }>();
+const GITHUB_SYNC_FAILURE_RETRY_MS = 5_000;
+const EMPTY_GITHUB_SYNC_AT = new Date(0).toISOString();
+const githubSyncCache = new Map<
+  string,
+  {
+    expiresAtMs: number;
+    hasValue: boolean;
+    payload: GitHubSyncPayload;
+    refreshPromise: Promise<void> | null;
+  }
+>();
 const textDecoder = new TextDecoder();
 
 export interface SessionManagerLike {
@@ -188,6 +202,34 @@ function pickProjectDirectory(): Response {
   return Response.json({ path: stdout });
 }
 
+async function runCommand(args: string[], cwd: string): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+  try {
+    const proc = Bun.spawn(args, {
+      cwd,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+
+    const [exitCode, stdout, stderr] = await Promise.all([
+      proc.exited,
+      proc.stdout ? new Response(proc.stdout).text() : Promise.resolve(""),
+      proc.stderr ? new Response(proc.stderr).text() : Promise.resolve(""),
+    ]);
+
+    return {
+      exitCode,
+      stdout: stdout.trim(),
+      stderr: stderr.trim(),
+    };
+  } catch (error) {
+    return {
+      exitCode: 1,
+      stdout: "",
+      stderr: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
 function runCommandSync(args: string[], cwd: string): { exitCode: number; stdout: string; stderr: string } {
   try {
     const result = Bun.spawnSync(args, {
@@ -216,6 +258,22 @@ function resolveSessionBranchName(session: SessionMetadata): string | null {
   }
 
   const branchResult = runCommandSync(["git", "-C", session.workspacePath, "rev-parse", "--abbrev-ref", "HEAD"], session.workspacePath);
+  if (branchResult.exitCode !== 0 || !branchResult.stdout || branchResult.stdout === "HEAD") {
+    return null;
+  }
+
+  return branchResult.stdout;
+}
+
+async function resolveSessionBranchNameAsync(session: SessionMetadata): Promise<string | null> {
+  if (session.branchName && session.branchName.trim().length > 0) {
+    return session.branchName.trim();
+  }
+
+  const branchResult = await runCommand(
+    ["git", "-C", session.workspacePath, "rev-parse", "--abbrev-ref", "HEAD"],
+    session.workspacePath,
+  );
   if (branchResult.exitCode !== 0 || !branchResult.stdout || branchResult.stdout === "HEAD") {
     return null;
   }
@@ -374,26 +432,175 @@ function buildGitHubSyncForSession(session: SessionMetadata): GitHubSessionSyncI
   };
 }
 
-function buildGitHubSyncResponse(manager: SessionManagerLike, projectId: string): GitHubSyncResponse {
-  const nowMs = Date.now();
-  const cached = githubSyncCache.get(projectId);
-  if (cached && cached.expiresAtMs > nowMs) {
-    return { ...cached.payload, cached: true };
+async function buildGitHubSyncForSessionAsync(session: SessionMetadata): Promise<GitHubSessionSyncItem> {
+  const branchName = await resolveSessionBranchNameAsync(session);
+  if (!branchName) {
+    return {
+      sessionId: session.id,
+      branchName: null,
+      pr: null,
+      ci: null,
+      source: "none",
+    };
   }
 
-  const sessions = manager.listSessions(projectId);
-  const payload: GitHubSyncResponse = {
-    sessions: sessions.map((session) => buildGitHubSyncForSession(session)),
-    syncedAt: new Date(nowMs).toISOString(),
-    cached: false,
+  const ghResult = await runCommand(
+    [
+      "gh",
+      "pr",
+      "list",
+      "--head",
+      branchName,
+      "--state",
+      "all",
+      "--json",
+      "number,title,url,state,isDraft,statusCheckRollup",
+      "--limit",
+      "1",
+    ],
+    session.workspacePath,
+  );
+
+  if (ghResult.exitCode !== 0) {
+    return {
+      sessionId: session.id,
+      branchName,
+      pr: null,
+      ci: null,
+      source: "error",
+      error: ghResult.stderr || "Unable to sync PR/CI status from GitHub",
+    };
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(ghResult.stdout);
+  } catch {
+    return {
+      sessionId: session.id,
+      branchName,
+      pr: null,
+      ci: null,
+      source: "error",
+      error: "GitHub CLI returned invalid JSON",
+    };
+  }
+
+  if (!Array.isArray(parsed) || parsed.length === 0 || !parsed[0] || typeof parsed[0] !== "object") {
+    return {
+      sessionId: session.id,
+      branchName,
+      pr: null,
+      ci: null,
+      source: "none",
+    };
+  }
+
+  const item = parsed[0] as {
+    number?: unknown;
+    title?: unknown;
+    url?: unknown;
+    state?: unknown;
+    isDraft?: unknown;
+    statusCheckRollup?: unknown;
   };
 
-  githubSyncCache.set(projectId, {
-    expiresAtMs: nowMs + GITHUB_SYNC_CACHE_TTL_MS,
-    payload,
+  const state = typeof item.state === "string" ? item.state.toUpperCase() : "";
+  const prState: GitHubPullRequestState =
+    state === "OPEN" || state === "CLOSED" || state === "MERGED" ? state : "OPEN";
+
+  return {
+    sessionId: session.id,
+    branchName,
+    pr: {
+      number: typeof item.number === "number" ? item.number : 0,
+      title: typeof item.title === "string" ? item.title : "",
+      url: typeof item.url === "string" ? item.url : "",
+      state: prState,
+      isDraft: item.isDraft === true,
+    },
+    ci: summarizeStatusChecks(item.statusCheckRollup),
+    source: "github",
+  };
+}
+
+function getGitHubSyncCacheEntry(projectId: string) {
+  const existing = githubSyncCache.get(projectId);
+  if (existing) {
+    return existing;
+  }
+
+  const created = {
+    expiresAtMs: 0,
+    hasValue: false,
+    payload: {
+      sessions: [],
+      syncedAt: EMPTY_GITHUB_SYNC_AT,
+    },
+    refreshPromise: null as Promise<void> | null,
+  };
+  githubSyncCache.set(projectId, created);
+  return created;
+}
+
+async function refreshGitHubSyncCache(manager: SessionManagerLike, projectId: string): Promise<void> {
+  const entry = getGitHubSyncCacheEntry(projectId);
+  if (entry.refreshPromise) {
+    return entry.refreshPromise;
+  }
+
+  const refreshPromise = (async () => {
+    try {
+      const sessions = manager.listSessions(projectId);
+      const items: GitHubSessionSyncItem[] = [];
+      for (const session of sessions) {
+        items.push(await buildGitHubSyncForSessionAsync(session));
+      }
+
+      const activeEntry = githubSyncCache.get(projectId);
+      if (!activeEntry) {
+        return;
+      }
+
+      activeEntry.hasValue = true;
+      activeEntry.expiresAtMs = Date.now() + GITHUB_SYNC_CACHE_TTL_MS;
+      activeEntry.payload = {
+        sessions: items,
+        syncedAt: new Date().toISOString(),
+      };
+    } catch {
+      const activeEntry = githubSyncCache.get(projectId);
+      if (!activeEntry) {
+        return;
+      }
+
+      activeEntry.expiresAtMs = Date.now() + GITHUB_SYNC_FAILURE_RETRY_MS;
+    }
+  })().finally(() => {
+    const activeEntry = githubSyncCache.get(projectId);
+    if (activeEntry?.refreshPromise === refreshPromise) {
+      activeEntry.refreshPromise = null;
+    }
   });
 
-  return payload;
+  entry.refreshPromise = refreshPromise;
+  return refreshPromise;
+}
+
+function buildGitHubSyncResponse(manager: SessionManagerLike, projectId: string): GitHubSyncResponse {
+  const nowMs = Date.now();
+  const entry = getGitHubSyncCacheEntry(projectId);
+  const isFresh = entry.hasValue && entry.expiresAtMs > nowMs;
+
+  if (!isFresh && !entry.refreshPromise) {
+    void refreshGitHubSyncCache(manager, projectId);
+  }
+
+  return {
+    ...entry.payload,
+    cached: entry.hasValue,
+    refreshing: entry.refreshPromise !== null,
+  };
 }
 
 export function createServerConfig(
