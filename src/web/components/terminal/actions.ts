@@ -17,6 +17,7 @@ export type TerminalActionId =
   | SessionLifecycleActionId
   | "view.toggle-sidebar"
   | "view.toggle-wide-mode"
+  | "view.toggle-activity-indicators"
   | "view.hide-header"
   | "view.show-header";
 
@@ -68,6 +69,7 @@ export interface TerminalActionContext {
   isSidebarVisible: boolean;
   isWideMode: boolean;
   isHeaderVisible: boolean;
+  isActivityIndicatorsVisible: boolean;
   pending: {
     pickProject: boolean;
     createSession: boolean;
@@ -93,6 +95,7 @@ export interface TerminalActionHandlers {
   }) => void;
   toggleSidebar: () => void;
   toggleWideMode: () => void;
+  toggleActivityIndicators: () => void;
   hideHeader: () => void;
   showHeader: () => void;
 }
@@ -393,6 +396,20 @@ export const TERMINAL_ACTIONS: TerminalActionDefinition[] = [
     },
     run: (_context, handlers) => {
       handlers.toggleWideMode();
+    },
+  },
+  {
+    id: "view.toggle-activity-indicators",
+    label: "Toggle Activity Indicators",
+    description: "Show or hide the session refresh and GitHub sync activity indicators.",
+    group: "View",
+    icon: "refresh",
+    keywords: ["view", "activity", "indicators", "github", "sync", "polling", "status", "toggle", "show", "hide"],
+    getAvailability: () => {
+      return { enabled: true };
+    },
+    run: (_context, handlers) => {
+      handlers.toggleActivityIndicators();
     },
   },
   {

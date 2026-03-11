@@ -25,7 +25,7 @@ Web terminal app powered by Bun PTY + zsh on the backend and TanStack React + xt
 - Session-level actions (including command palette actions) default to the active slot session.
 - The left control sidebar can be toggled with `Cmd/Ctrl+Shift+B` or from the command palette.
 - Session tiles can show synced GitHub PR/CI status via `gh` (`open`/`draft`/`merged` and check summary).
-- GitHub badge sync is cached and refreshed in the background, and the UI surfaces when session refresh/GitHub sync work is running.
+- GitHub badge sync is cached and refreshed in the background, and optional activity indicators can be toggled on to surface when session refresh/GitHub sync work is running.
 
 ## Docs
 

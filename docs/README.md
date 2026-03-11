@@ -185,7 +185,7 @@ Responsibilities:
 - Supports saving/loading named workspace presets per project
 - Supports cross-project pinned session board for quick switching
 - Renders per-session PR/CI sync badges in session rows and workspace slot headers
-- Shows live activity indicators for session refresh polling and GitHub badge sync work in the header/sidebar
+- Shows optional activity indicators for session refresh polling and GitHub badge sync work in the header/sidebar
 - Renders workspace slot state badges (`Focused`, `Active`, `Live`) with tooltips
 - Routes default session actions through the active slot session (shown in command palette header)
 - Exposes project actions (pick, enter path, settings, delete)
@@ -200,6 +200,7 @@ Responsibilities:
   - set session lifecycle state (`planning`, `exploration`, `implementing`, `in review`, `submitted PR`, `merged`, `blocked`, `paused`)
   - toggle sidebar (`Cmd/Ctrl+Shift+B`)
   - toggle wide mode (full-width layout with minimal side padding)
+  - toggle activity indicators (session refresh + GitHub sync status; hidden by default)
   - hide header / show header
 - Renders session lifecycle badges and "time in state" in the session list
 - Supports per-session lifecycle updates from both command palette and session-row dropdown menu

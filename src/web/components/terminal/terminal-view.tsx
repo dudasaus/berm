@@ -79,6 +79,7 @@ const SELECTED_PROJECT_STORAGE_KEY = "berm.selected-project-id";
 const HEADER_VISIBLE_STORAGE_KEY = "berm.header-visible";
 const SIDEBAR_VISIBLE_STORAGE_KEY = "berm.sidebar-visible";
 const WIDE_MODE_STORAGE_KEY = "berm.wide-mode";
+const ACTIVITY_INDICATORS_VISIBLE_STORAGE_KEY = "berm.activity-indicators-visible";
 const WORKSPACE_BOARD_STORAGE_KEY = "berm.workspace-board";
 const MAX_WORKSPACE_SLOTS = 4;
 const PALETTE_GROUP_ORDER: TerminalActionGroup[] = ["Session", "Project", "View"];
@@ -773,6 +774,14 @@ function readStoredWideMode(): boolean {
   return window.localStorage.getItem(WIDE_MODE_STORAGE_KEY) === "true";
 }
 
+function readStoredActivityIndicatorsVisible(): boolean {
+  if (typeof window === "undefined") {
+    return false;
+  }
+
+  return window.localStorage.getItem(ACTIVITY_INDICATORS_VISIBLE_STORAGE_KEY) === "true";
+}
+
 function readStoredSidebarVisible(): boolean {
   if (typeof window === "undefined") {
     return true;
@@ -1098,6 +1107,7 @@ export function TerminalView() {
   const [worktreeHookFailure, setWorktreeHookFailure] = useState<WorktreeHookFailurePayload | null>(null);
   const [hookOutputDialog, setHookOutputDialog] = useState<HookOutputDialogState | null>(null);
   const [isWideMode, setIsWideMode] = useState(() => readStoredWideMode());
+  const [isActivityIndicatorsVisible, setIsActivityIndicatorsVisible] = useState(() => readStoredActivityIndicatorsVisible());
   const [isSidebarVisible, setIsSidebarVisible] = useState(() => readStoredSidebarVisible());
   const [isHeaderVisible, setIsHeaderVisible] = useState(() => readStoredHeaderVisible());
   const [isStackedLayout, setIsStackedLayout] = useState(() => {
@@ -1341,6 +1351,13 @@ export function TerminalView() {
   useEffect(() => {
     window.localStorage.setItem(WIDE_MODE_STORAGE_KEY, isWideMode ? "true" : "false");
   }, [isWideMode]);
+
+  useEffect(() => {
+    window.localStorage.setItem(
+      ACTIVITY_INDICATORS_VISIBLE_STORAGE_KEY,
+      isActivityIndicatorsVisible ? "true" : "false",
+    );
+  }, [isActivityIndicatorsVisible]);
 
   useEffect(() => {
     window.localStorage.setItem(SIDEBAR_VISIBLE_STORAGE_KEY, isSidebarVisible ? "true" : "false");
@@ -2490,6 +2507,7 @@ export function TerminalView() {
       isSidebarVisible,
       isWideMode,
       isHeaderVisible,
+      isActivityIndicatorsVisible,
       pending: {
         pickProject: selectProjectMutation.isPending,
         createSession: createSessionMutation.isPending,
@@ -2510,6 +2528,7 @@ export function TerminalView() {
       deleteProjectMutation.isPending,
       deleteSessionMutation.isPending,
       isHeaderVisible,
+      isActivityIndicatorsVisible,
       isSidebarVisible,
       isWideMode,
       selectedProject,
@@ -2545,6 +2564,9 @@ export function TerminalView() {
     toggleSidebar,
     toggleWideMode: () => {
       setIsWideMode((current) => !current);
+    },
+    toggleActivityIndicators: () => {
+      setIsActivityIndicatorsVisible((current) => !current);
     },
     hideHeader: () => {
       setIsHeaderVisible(false);
@@ -2709,7 +2731,7 @@ export function TerminalView() {
           </header>
         ) : null}
 
-        {selectedProjectId ? (
+        {selectedProjectId && isActivityIndicatorsVisible ? (
           <section className="grid gap-2 md:grid-cols-2">
             {backgroundTasks.map((activity) => {
               const Icon = activity.icon;
@@ -2967,7 +2989,7 @@ export function TerminalView() {
                           </DropdownMenu>
                       </div>
 
-                      {selectedProjectId ? (
+                      {selectedProjectId && isActivityIndicatorsVisible ? (
                         <div className="flex flex-wrap items-center gap-1">
                           <Badge
                             variant={backgroundTaskByKey.sessionRefresh.inFlight ? "warning" : "outline"}
