@@ -16,6 +16,7 @@ A project maps to a real directory path, and each project can contain many termi
 
 ## Runtime Architecture
 
+- CLI entrypoint: `bin/berm` -> `src/cli.ts`
 - Server runtime: `Bun.serve()` in `src/server/index.ts`
 - Frontend runtime: React app mounted from `src/web/index.html` and `src/web/main.tsx`
 - Terminal backend: `TerminalSessionManager` in `src/server/terminal-session.ts`
@@ -311,6 +312,8 @@ bun run typecheck
 
 ## Build / Packaging
 
+- Published CLI package: `@dudasaus/berm`
+- Runtime entry for `bunx @dudasaus/berm`: `bin/berm`
 - Compile command: `bun run compile`
 - Wrapper script: `compile.sh`
 - Build implementation: `scripts/compile.ts`
@@ -322,8 +325,9 @@ Important detail:
 
 Output behavior:
 
+- The package CLI and compiled binary both start from `src/cli.ts`.
 - Build emits a standalone binary and normalizes it to `./berm` at repository root.
-- `compile.sh` can optionally move this binary to `~/.local/bin/berm`.
+- `compile.sh` can optionally move this binary to `~/.local/bin/berm` when stdin is interactive.
 
 ## Environment Variables
 

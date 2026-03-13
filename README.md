@@ -38,6 +38,16 @@ bun install
 bun run dev
 ```
 
+## CLI
+
+```bash
+bunx @dudasaus/berm
+```
+
+- Starts Berm on port `3000` by default.
+- Pass `--port <number>` or `-p <number>` to override the port.
+- Use `--help` to print CLI usage.
+
 ## Compile
 
 ```bash
@@ -45,7 +55,8 @@ bun run compile
 ```
 
 - Produces a standalone binary at `./berm`.
-- `compile.sh` can optionally move it to `~/.local/bin/berm`.
+- `compile.sh` can optionally move it to `~/.local/bin/berm` when run interactively.
+- The compiled binary uses the same CLI entrypoint as the published package.
 - Compilation is implemented in `scripts/compile.ts` using `Bun.build()` with the `bun-plugin-tailwind` plugin so frontend CSS is bundled correctly.
 
 ## Test

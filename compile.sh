@@ -5,6 +5,11 @@ set -e
 echo "Compiling berm..."
 bun scripts/compile.ts
 
+if [[ ! -t 0 ]]; then
+    echo "Skipping install prompt because stdin is not interactive."
+    exit 0
+fi
+
 read -p "Move to ~/.local/bin? [y/N] " -n 1 -r
 echo
 

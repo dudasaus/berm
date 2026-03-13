@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const outputPath = resolve(scriptDir, "../berm");
-const entrypoint = resolve(scriptDir, "../src/server/index.ts");
+const entrypoint = resolve(scriptDir, "../src/cli.ts");
 
 const result = await Bun.build({
   entrypoints: [entrypoint],
