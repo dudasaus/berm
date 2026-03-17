@@ -122,6 +122,10 @@ class FakeSessionManager implements SessionManagerLike {
     return [...this.sessions.values()].filter((session) => session.projectId === projectId);
   }
 
+  listAllSessions(): SessionMetadata[] {
+    return [...this.sessions.values()];
+  }
+
   listImportWorktreeCandidates(projectId: string): ListImportWorktreeCandidatesResult {
     const project = this.projects.get(projectId);
     if (!project) {

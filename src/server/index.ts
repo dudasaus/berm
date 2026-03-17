@@ -84,6 +84,7 @@ export interface SessionManagerLike {
   deleteProject(projectId: string): boolean;
   getProject(projectId: string): ProjectMetadata | null;
   listSessions(projectId: string): SessionMetadata[];
+  listAllSessions(): SessionMetadata[];
   listImportWorktreeCandidates(projectId: string): ListImportWorktreeCandidatesResult;
   importWorktreeSessions(projectId: string, request?: ImportWorktreeSessionsRequest): ImportWorktreeSessionsResult;
   createSession(projectId: string, request?: CreateSessionRequest): CreateSessionResult;
@@ -654,6 +655,11 @@ export function createServerConfig(
       "/api/projects/pick": {
         POST: () => {
           return openProjectPicker();
+        },
+      },
+      "/api/sessions": {
+        GET: () => {
+          return Response.json({ sessions: manager.listAllSessions() });
         },
       },
       "/api/projects/:projectId/sessions": {

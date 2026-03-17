@@ -609,6 +609,17 @@ export class TerminalSessionManager {
       .map((session) => this.toMetadata(session));
   }
 
+  listAllSessions(): SessionMetadata[] {
+    this.syncSessionsFromTmux();
+    if (!this.isTmuxAvailable()) {
+      return [];
+    }
+
+    return [...this.sessions.values()]
+      .sort((a, b) => b.lastActiveAtMs - a.lastActiveAtMs)
+      .map((session) => this.toMetadata(session));
+  }
+
   hasSession(projectId: string, sessionId: string): boolean {
     this.syncSessionsFromTmux();
     if (!this.isTmuxAvailable()) {

@@ -45,7 +45,7 @@ File: `src/server/terminal-session.ts`
 Responsibilities:
 
 - Project CRUD surface used by API layer (`listProjects`, `selectProject`, `updateProject`, `deleteProject`)
-- Project-scoped session lifecycle (`createSession`, `importWorktreeSessions`, `listSessions`, `updateSessionLifecycleState`, `deleteSession`)
+- Project-scoped session lifecycle (`createSession`, `importWorktreeSessions`, `listSessions`, `listAllSessions`, `updateSessionLifecycleState`, `deleteSession`)
 - WebSocket client attach/detach and message handling
 - tmux reconciliation and availability/error management
 - git worktree creation/removal for worktree-mode sessions
@@ -123,6 +123,10 @@ Validation rules for selection:
 - `POST /api/projects/pick` (native folder picker on macOS)
 - `DELETE /api/projects/:id` (deletes project + all sessions)
 
+### Sessions
+
+- `GET /api/sessions` (all sessions across all projects)
+
 ### Sessions (project-scoped)
 
 - `GET /api/projects/:projectId/sessions`
@@ -182,7 +186,7 @@ Responsibilities:
 - Manages per-project manual session ordering
 - Renders left control pane and right terminal pane
 - Supports multi-session workspace layouts (`single`, `split`, `quad`) in the terminal pane
-- Supports per-slot session assignment with optional focus mode for one slot
+- Supports per-slot session assignment with optional focus mode for one slot (slots can hold sessions from any project)
 - Supports saving/loading named workspace presets per project
 - Supports cross-project pinned session board for quick switching
 - Renders per-session PR/CI sync badges in session rows and workspace slot headers
@@ -248,7 +252,7 @@ Stored in web storage:
 - Sidebar visibility in `localStorage` (`berm.sidebar-visible`)
 - Wide mode in `localStorage` (`berm.wide-mode`)
 - Workspace layout per project in `localStorage` (`berm.workspace-layout.<projectId>`)
-- Workspace slot assignments per project in `localStorage` (`berm.workspace-slots.<projectId>`)
+- Workspace slot assignments per project in `localStorage` (`berm.workspace-slots.<projectId>`) — each slot is a `{ projectId, sessionId }` reference (supports cross-project sessions)
 - Workspace presets per project in `localStorage` (`berm.workspace-presets.<projectId>`)
 - Cross-project pinned workspace board in `localStorage` (`berm.workspace-board`)
 
@@ -314,20 +318,8 @@ bun run typecheck
 
 - Published CLI package: `@dudasaus/berm`
 - Runtime entry for `bunx @dudasaus/berm`: `bin/berm`
-- Compile command: `bun run compile`
-- Wrapper script: `compile.sh`
-- Build implementation: `scripts/compile.ts`
-
-Important detail:
-
-- We compile via `Bun.build({ compile: true, plugins: [tailwindPlugin] })` instead of `bun build --compile ...` directly.
-- Reason: current Bun CLI compile flow does not apply `[serve.static].plugins` from `bunfig.toml`, which can skip Tailwind CSS processing for standalone binaries.
-
-Output behavior:
-
-- The package CLI and compiled binary both start from `src/cli.ts`.
-- Build emits a standalone binary and normalizes it to `./berm` at repository root.
-- `compile.sh` can optionally move this binary to `~/.local/bin/berm` when stdin is interactive.
+- Publish: `bun publish`
+- CLI entrypoint: `src/cli.ts`
 
 ## Environment Variables
 

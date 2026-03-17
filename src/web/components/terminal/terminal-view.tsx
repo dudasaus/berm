@@ -86,10 +86,12 @@ const PALETTE_GROUP_ORDER: TerminalActionGroup[] = ["Session", "Project", "View"
 
 type WorkspaceLayoutMode = "single" | "split" | "quad";
 
+type SlotRef = { projectId: string; sessionId: string } | null;
+
 type WorkspaceLayoutPreset = {
   name: string;
   layout: WorkspaceLayoutMode;
-  slots: Array<string | null>;
+  slots: Array<SlotRef>;
 };
 
 type WorkspaceBoardEntry = {
@@ -368,6 +370,34 @@ async function fetchSessions(projectId: string) {
   }
 
   return payload.sessions ?? [];
+}
+
+async function fetchAllSessions(): Promise<SessionMetadata[]> {
+  const response = await fetch("/api/sessions");
+  if (!response.ok) {
+    throw new Error(`all-sessions request failed with ${response.status}`);
+  }
+
+  const payload = (await response.json()) as { sessions?: SessionMetadata[] };
+  return payload.sessions ?? [];
+}
+
+function slotRefKey(ref: SlotRef): string {
+  return ref ? `${ref.projectId}:${ref.sessionId}` : "";
+}
+
+function slotRefsEqual(a: SlotRef, b: SlotRef): boolean {
+  if (a === null && b === null) return true;
+  if (a === null || b === null) return false;
+  return a.projectId === b.projectId && a.sessionId === b.sessionId;
+}
+
+function slotRefArrayEqual(a: Array<SlotRef>, b: Array<SlotRef>): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (!slotRefsEqual(a[i] ?? null, b[i] ?? null)) return false;
+  }
+  return true;
 }
 
 async function fetchSession(projectId: string, sessionId: string): Promise<SessionMetadata | null> {
@@ -807,7 +837,21 @@ function readStoredWorkspaceLayout(projectId: string): WorkspaceLayoutMode {
   return "single";
 }
 
-function readStoredWorkspaceSlots(projectId: string): Array<string | null> {
+function parseSlotRefValue(value: unknown, fallbackProjectId: string): SlotRef {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "string" && value.trim().length > 0) {
+    return { projectId: fallbackProjectId, sessionId: value.trim() };
+  }
+  if (typeof value === "object" && value !== null) {
+    const obj = value as Record<string, unknown>;
+    if (typeof obj.projectId === "string" && typeof obj.sessionId === "string" && obj.sessionId.trim().length > 0) {
+      return { projectId: obj.projectId, sessionId: obj.sessionId.trim() };
+    }
+  }
+  return null;
+}
+
+function readStoredWorkspaceSlots(projectId: string): Array<SlotRef> {
   if (typeof window === "undefined") {
     return [];
   }
@@ -823,9 +867,7 @@ function readStoredWorkspaceSlots(projectId: string): Array<string | null> {
       return [];
     }
 
-    return parsed
-      .slice(0, MAX_WORKSPACE_SLOTS)
-      .map((value) => (typeof value === "string" && value.trim().length > 0 ? value : null));
+    return parsed.slice(0, MAX_WORKSPACE_SLOTS).map((value) => parseSlotRefValue(value, projectId));
   } catch {
     return [];
   }
@@ -861,10 +903,8 @@ function readStoredWorkspacePresets(projectId: string): WorkspaceLayoutPreset[] 
           return null;
         }
 
-        const slots = Array.isArray(preset.slots)
-          ? preset.slots
-              .slice(0, MAX_WORKSPACE_SLOTS)
-              .map((slot) => (typeof slot === "string" && slot.trim().length > 0 ? slot : null))
+        const slots: Array<SlotRef> = Array.isArray(preset.slots)
+          ? preset.slots.slice(0, MAX_WORKSPACE_SLOTS).map((slot) => parseSlotRefValue(slot, projectId))
           : [];
 
         return { name, layout, slots };
@@ -1035,9 +1075,9 @@ function paneCountForLayout(layout: WorkspaceLayoutMode): number {
   }
 }
 
-function slotsEqual(a: Array<string | null>, b: Array<string | null>): boolean {
+function slotsEqual(a: Array<SlotRef>, b: Array<SlotRef>): boolean {
   for (let index = 0; index < MAX_WORKSPACE_SLOTS; index += 1) {
-    if ((a[index] ?? null) !== (b[index] ?? null)) {
+    if (!slotRefsEqual(a[index] ?? null, b[index] ?? null)) {
       return false;
     }
   }
@@ -1092,7 +1132,7 @@ export function TerminalView() {
   const [activeWorkspaceSessionId, setActiveWorkspaceSessionId] = useState<string | null>(null);
   const [sessionOrder, setSessionOrder] = useState<string[]>([]);
   const [workspaceLayout, setWorkspaceLayout] = useState<WorkspaceLayoutMode>("single");
-  const [workspaceSlots, setWorkspaceSlots] = useState<Array<string | null>>([]);
+  const [workspaceSlots, setWorkspaceSlots] = useState<Array<SlotRef>>([]);
   const [workspacePresets, setWorkspacePresets] = useState<WorkspaceLayoutPreset[]>([]);
   const [workspaceBoard, setWorkspaceBoard] = useState<WorkspaceBoardEntry[]>(() => readStoredWorkspaceBoard());
   const [focusedWorkspaceSlot, setFocusedWorkspaceSlot] = useState<number | null>(null);
@@ -1422,6 +1462,12 @@ export function TerminalView() {
       const data = query.state.data as SessionGitHubSyncResponse | undefined;
       return data?.refreshing ? 1_000 : 20_000;
     },
+  });
+
+  const allSessionsQuery = useQuery({
+    queryKey: ["all-sessions"],
+    queryFn: fetchAllSessions,
+    refetchInterval: 5_000,
   });
 
   const selectProjectMutation = useMutation({
@@ -1786,6 +1832,11 @@ export function TerminalView() {
       }
       return filtered;
     });
+    setWorkspaceSlots((previous) => {
+      const next = previous.map((ref) => (ref && !validProjectIds.has(ref.projectId) ? null : ref));
+      if (slotsEqual(next, previous)) return previous;
+      return next;
+    });
   }, [projects]);
 
   const sessions = sessionsQuery.data ?? [];
@@ -1844,23 +1895,45 @@ export function TerminalView() {
     const entries = sessionGitHubSyncQuery.data?.sessions ?? [];
     return new Map(entries.map((entry) => [entry.sessionId, entry]));
   }, [sessionGitHubSyncQuery.data]);
+  const allSessions = allSessionsQuery.data ?? [];
+  const allSessionsById = useMemo(() => {
+    return new Map(allSessions.map((session) => [`${session.projectId}:${session.id}`, session]));
+  }, [allSessions]);
+  const allSessionsByProject = useMemo(() => {
+    const grouped = new Map<string, SessionMetadata[]>();
+    for (const session of allSessions) {
+      const list = grouped.get(session.projectId);
+      if (list) {
+        list.push(session);
+      } else {
+        grouped.set(session.projectId, [session]);
+      }
+    }
+    return grouped;
+  }, [allSessions]);
+  const projectById = useMemo(() => {
+    return new Map(projects.map((project) => [project.id, project]));
+  }, [projects]);
   const workspacePaneCount = paneCountForLayout(workspaceLayout);
   const resolvedWorkspaceSlots = useMemo(() => {
-    const next: Array<string | null> = Array.from({ length: MAX_WORKSPACE_SLOTS }, () => null);
+    const next: Array<SlotRef> = Array.from({ length: MAX_WORKSPACE_SLOTS }, () => null);
     const seen = new Set<string>();
 
     for (let index = 0; index < MAX_WORKSPACE_SLOTS; index += 1) {
-      const slotSessionId = workspaceSlots[index] ?? null;
-      if (!slotSessionId || !sessionById.has(slotSessionId) || seen.has(slotSessionId)) {
+      const slotRef = workspaceSlots[index] ?? null;
+      if (!slotRef) continue;
+      const key = slotRefKey(slotRef);
+      if (!allSessionsById.has(key) || seen.has(key)) {
         continue;
       }
 
-      next[index] = slotSessionId;
-      seen.add(slotSessionId);
+      next[index] = slotRef;
+      seen.add(key);
     }
 
     for (const session of orderedSessions) {
-      if (seen.has(session.id)) {
+      const key = `${session.projectId}:${session.id}`;
+      if (seen.has(key)) {
         continue;
       }
 
@@ -1869,12 +1942,12 @@ export function TerminalView() {
         break;
       }
 
-      next[firstEmpty] = session.id;
-      seen.add(session.id);
+      next[firstEmpty] = { projectId: session.projectId, sessionId: session.id };
+      seen.add(key);
     }
 
     return next;
-  }, [orderedSessions, sessionById, workspaceSlots]);
+  }, [orderedSessions, allSessionsById, workspaceSlots]);
   const visibleWorkspaceSlotIndexes = useMemo(() => {
     const focusedSlotHasSession =
       focusedWorkspaceSlot !== null &&
@@ -1893,7 +1966,7 @@ export function TerminalView() {
         return -1;
       }
       return visibleWorkspaceSlotIndexes.findIndex(
-        (slotIndex) => (resolvedWorkspaceSlots[slotIndex] ?? null) === sessionId,
+        (slotIndex) => (resolvedWorkspaceSlots[slotIndex]?.sessionId ?? null) === sessionId,
       );
     };
 
@@ -1916,7 +1989,8 @@ export function TerminalView() {
 
     return visibleWorkspaceSlotIndexes[0] ?? 0;
   }, [activeWorkspaceSessionId, resolvedWorkspaceSlots, selectedSessionId, visibleWorkspaceSlotIndexes]);
-  const activeVisibleSlotSessionId = resolvedWorkspaceSlots[activeVisibleSlotIndex] ?? null;
+  const activeVisibleSlotRef = resolvedWorkspaceSlots[activeVisibleSlotIndex] ?? null;
+  const activeVisibleSlotSessionId = activeVisibleSlotRef?.sessionId ?? null;
   const actionTargetSessionId = activeVisibleSlotSessionId ?? activeWorkspaceSessionId ?? selectedSessionId;
   const actionTargetSession = useMemo(
     () => (actionTargetSessionId ? (sessionById.get(actionTargetSessionId) ?? null) : null),
@@ -2000,36 +2074,33 @@ export function TerminalView() {
   }, [orderedSessions]);
 
   useEffect(() => {
-    if (orderedSessions.length === 0) {
+    if (orderedSessions.length === 0 && allSessions.length === 0) {
       setWorkspaceSlots((previous) => (previous.length === 0 ? previous : []));
       return;
     }
 
-    const validSessionIds = new Set(orderedSessions.map((session) => session.id));
     setWorkspaceSlots((previous) => {
-      const next = Array.from({ length: MAX_WORKSPACE_SLOTS }, (_unused, index) => {
-        const sessionId = previous[index] ?? null;
-        if (!sessionId || !validSessionIds.has(sessionId)) {
-          return null;
-        }
-        return sessionId;
+      const next: Array<SlotRef> = Array.from({ length: MAX_WORKSPACE_SLOTS }, (_unused, index) => {
+        const ref = previous[index] ?? null;
+        if (!ref) return null;
+        if (!allSessionsById.has(slotRefKey(ref))) return null;
+        return ref;
       });
 
       const seen = new Set<string>();
       for (let index = 0; index < next.length; index += 1) {
-        const sessionId = next[index];
-        if (!sessionId) {
-          continue;
-        }
-        if (seen.has(sessionId)) {
+        const ref = next[index];
+        if (!ref) continue;
+        const key = slotRefKey(ref);
+        if (seen.has(key)) {
           next[index] = null;
           continue;
         }
-        seen.add(sessionId);
+        seen.add(key);
       }
 
-      if (!next.some((sessionId) => sessionId !== null) && orderedSessions[0]) {
-        next[0] = orderedSessions[0].id;
+      if (!next.some((ref) => ref !== null) && orderedSessions[0]) {
+        next[0] = { projectId: orderedSessions[0].projectId, sessionId: orderedSessions[0].id };
       }
 
       if (slotsEqual(next, previous)) {
@@ -2038,7 +2109,7 @@ export function TerminalView() {
 
       return next;
     });
-  }, [orderedSessions]);
+  }, [orderedSessions, allSessions, allSessionsById]);
 
   useEffect(() => {
     const maxPaneIndex = workspacePaneCount - 1;
@@ -2325,18 +2396,20 @@ export function TerminalView() {
     });
   };
 
-  const addSessionToWorkspace = useCallback((sessionId: string) => {
+  const addSessionToWorkspace = useCallback((projectId: string, sessionId: string) => {
+    const ref: SlotRef = { projectId, sessionId };
+    const key = slotRefKey(ref);
     setWorkspaceSlots((previous) => {
-      if (previous.includes(sessionId)) {
+      if (previous.some((r) => r && slotRefKey(r) === key)) {
         return previous;
       }
 
-      const next = Array.from({ length: MAX_WORKSPACE_SLOTS }, (_unused, index) => previous[index] ?? null);
+      const next: Array<SlotRef> = Array.from({ length: MAX_WORKSPACE_SLOTS }, (_unused, index) => previous[index] ?? null);
       const firstEmpty = next.findIndex((value) => value === null);
       if (firstEmpty >= 0) {
-        next[firstEmpty] = sessionId;
+        next[firstEmpty] = ref;
       } else {
-        next[0] = sessionId;
+        next[0] = ref;
       }
       return next;
     });
@@ -2403,17 +2476,19 @@ export function TerminalView() {
     [unpinSessionFromWorkspaceBoard],
   );
 
-  const setWorkspaceSlotSession = useCallback((slotIndex: number, sessionId: string | null) => {
+  const setWorkspaceSlotSession = useCallback((slotIndex: number, ref: SlotRef) => {
     setWorkspaceSlots((previous) => {
-      const next = Array.from({ length: MAX_WORKSPACE_SLOTS }, (_unused, index) => previous[index] ?? null);
-      next[slotIndex] = sessionId;
+      const next: Array<SlotRef> = Array.from({ length: MAX_WORKSPACE_SLOTS }, (_unused, index) => previous[index] ?? null);
+      next[slotIndex] = ref;
 
-      for (let index = 0; index < next.length; index += 1) {
-        if (index === slotIndex) {
-          continue;
-        }
-        if (next[index] === sessionId) {
-          next[index] = null;
+      if (ref) {
+        const key = slotRefKey(ref);
+        for (let index = 0; index < next.length; index += 1) {
+          if (index === slotIndex) continue;
+          const existing = next[index];
+          if (existing && slotRefKey(existing) === key) {
+            next[index] = null;
+          }
         }
       }
 
@@ -2428,7 +2503,7 @@ export function TerminalView() {
   const activateSessionFromSessionList = useCallback(
     (sessionId: string) => {
       const visibleSlot = visibleWorkspaceSlotIndexes.find(
-        (slotIndex) => (resolvedWorkspaceSlots[slotIndex] ?? null) === sessionId,
+        (slotIndex) => resolvedWorkspaceSlots[slotIndex]?.sessionId === sessionId,
       );
       if (typeof visibleSlot === "number") {
         setSelectedSessionId(sessionId);
@@ -2436,11 +2511,11 @@ export function TerminalView() {
         return;
       }
 
-      setWorkspaceSlotSession(activeVisibleSlotIndex, sessionId);
+      setWorkspaceSlotSession(activeVisibleSlotIndex, selectedProjectId ? { projectId: selectedProjectId, sessionId } : null);
       setSelectedSessionId(sessionId);
       setActiveWorkspaceSessionId(sessionId);
     },
-    [activeVisibleSlotIndex, resolvedWorkspaceSlots, setWorkspaceSlotSession, visibleWorkspaceSlotIndexes],
+    [activeVisibleSlotIndex, resolvedWorkspaceSlots, selectedProjectId, setWorkspaceSlotSession, visibleWorkspaceSlotIndexes],
   );
 
   const saveWorkspacePreset = useCallback(() => {
@@ -2476,16 +2551,17 @@ export function TerminalView() {
   }, []);
 
   const handleSessionUnavailable = useCallback(
-    (sessionId: string, reason: SessionUnavailableReason) => {
+    (projectId: string, sessionId: string, reason: SessionUnavailableReason) => {
       setSelectedSessionId((current) => (current === sessionId ? null : current));
-      setWorkspaceSlots((previous) => previous.map((slotSessionId) => (slotSessionId === sessionId ? null : slotSessionId)));
+      setWorkspaceSlots((previous) =>
+        previous.map((ref) => (ref && ref.projectId === projectId && ref.sessionId === sessionId ? null : ref)),
+      );
       toast.warning(reason === "deleted" ? `Session ${sessionId} was deleted` : `Session ${sessionId} was not found`);
-      if (selectedProjectId) {
-        void queryClient.invalidateQueries({ queryKey: ["sessions", selectedProjectId] });
-        void queryClient.invalidateQueries({ queryKey: ["sessions-github-sync", selectedProjectId] });
-      }
+      void queryClient.invalidateQueries({ queryKey: ["sessions", projectId] });
+      void queryClient.invalidateQueries({ queryKey: ["sessions-github-sync", projectId] });
+      void queryClient.invalidateQueries({ queryKey: ["all-sessions"] });
     },
-    [queryClient, selectedProjectId],
+    [queryClient],
   );
 
   const reconnectSelectedSession = useCallback(() => {
@@ -2650,11 +2726,12 @@ export function TerminalView() {
   };
 
   const workspaceItems = useMemo(() => {
-    return resolvedWorkspaceSlots.slice(0, workspacePaneCount).map((sessionId, slotIndex) => ({
+    return resolvedWorkspaceSlots.slice(0, workspacePaneCount).map((ref, slotIndex) => ({
       slotIndex,
-      session: sessionId ? (sessionById.get(sessionId) ?? null) : null,
+      ref,
+      session: ref ? (allSessionsById.get(slotRefKey(ref)) ?? null) : null,
     }));
-  }, [resolvedWorkspaceSlots, sessionById, workspacePaneCount]);
+  }, [resolvedWorkspaceSlots, allSessionsById, workspacePaneCount]);
 
   const focusedWorkspaceItem =
     focusedWorkspaceSlot !== null && focusedWorkspaceSlot < workspaceItems.length ? workspaceItems[focusedWorkspaceSlot] : null;
@@ -3159,7 +3236,7 @@ export function TerminalView() {
                                       <DropdownMenuSeparator />
                                       <DropdownMenuItem
                                         onSelect={() => {
-                                          addSessionToWorkspace(session.id);
+                                          addSessionToWorkspace(session.projectId, session.id);
                                         }}
                                       >
                                         Add to workspace
@@ -3445,11 +3522,13 @@ export function TerminalView() {
             <Card className="h-full rounded-none border-0 bg-transparent shadow-none">
               <CardContent className="h-full rounded-none bg-[#1f1811] p-3">
                 {selectedProjectId ? (
-                  orderedSessions.length > 0 ? (
+                  orderedSessions.length > 0 || displayedWorkspaceItems.some((item) => item.session) ? (
                     <div className={workspaceGridClass}>
-                      {displayedWorkspaceItems.map(({ slotIndex, session }) => {
-                        const slotSessionId = resolvedWorkspaceSlots[slotIndex] ?? "";
-                        const slotSessionSync = session ? (sessionGitHubSyncById.get(session.id) ?? null) : null;
+                      {displayedWorkspaceItems.map(({ slotIndex, ref: slotRef, session }) => {
+                        const slotValue = slotRef ? slotRefKey(slotRef) : "";
+                        const isCrossProject = slotRef ? slotRef.projectId !== selectedProjectId : false;
+                        const slotProjectName = isCrossProject && slotRef ? (projectById.get(slotRef.projectId)?.name ?? null) : null;
+                        const slotSessionSync = session && !isCrossProject ? (sessionGitHubSyncById.get(session.id) ?? null) : null;
                         const isFocusedSlot = focusedWorkspaceSlot === slotIndex;
                         const isActiveSlot = Boolean(session) && slotIndex === activeVisibleSlotIndex;
                         const slotContainerClass = isFocusedSlot
@@ -3505,6 +3584,11 @@ export function TerminalView() {
                                 <p className="truncate font-mono text-xs font-semibold text-foreground">
                                   {session ? session.id : "No session selected"}
                                 </p>
+                                {slotProjectName ? (
+                                  <p className="truncate font-mono text-[10px] text-muted-foreground">
+                                    {slotProjectName}
+                                  </p>
+                                ) : null}
                                 {slotSessionSync?.pr || slotSessionSync?.ci ? (
                                   <div className="mt-1 flex flex-wrap items-center gap-1">
                                     {slotSessionSync.pr ? (
@@ -3534,22 +3618,48 @@ export function TerminalView() {
                                 <Tooltip>
                                   <TooltipTrigger asChild>
                                     <select
-                                      value={slotSessionId}
+                                      value={slotValue}
                                       onChange={(event) => {
-                                        const nextSessionId = event.target.value.trim() || null;
-                                        setWorkspaceSlotSession(slotIndex, nextSessionId);
-                                        if (nextSessionId) {
-                                          setSelectedSessionId(nextSessionId);
+                                        const raw = event.target.value.trim();
+                                        if (!raw) {
+                                          setWorkspaceSlotSession(slotIndex, null);
+                                          return;
+                                        }
+                                        const sepIndex = raw.indexOf(":");
+                                        if (sepIndex < 0) return;
+                                        const nextRef: SlotRef = { projectId: raw.slice(0, sepIndex), sessionId: raw.slice(sepIndex + 1) };
+                                        setWorkspaceSlotSession(slotIndex, nextRef);
+                                        if (nextRef.projectId === selectedProjectId) {
+                                          setSelectedSessionId(nextRef.sessionId);
                                         }
                                       }}
                                       className="h-7 min-w-[8rem] rounded-sm border border-border/70 bg-card px-2 font-mono text-[10px] text-foreground outline-none focus:border-primary/60"
                                     >
                                       <option value="">(empty)</option>
-                                      {orderedSessions.map((workspaceSession) => (
-                                        <option key={workspaceSession.id} value={workspaceSession.id}>
-                                          {workspaceSession.id}
-                                        </option>
-                                      ))}
+                                      {selectedProjectId ? (
+                                        <optgroup label={projectById.get(selectedProjectId)?.name ?? "Current project"}>
+                                          {orderedSessions.map((s) => (
+                                            <option key={`${selectedProjectId}:${s.id}`} value={`${selectedProjectId}:${s.id}`}>
+                                              {s.id}
+                                            </option>
+                                          ))}
+                                        </optgroup>
+                                      ) : null}
+                                      {projects
+                                        .filter((p) => p.id !== selectedProjectId)
+                                        .map((project) => {
+                                          const projectSessions = allSessionsByProject.get(project.id);
+                                          if (!projectSessions || projectSessions.length === 0) return null;
+                                          return (
+                                            <optgroup key={project.id} label={project.name}>
+                                              {projectSessions.map((s) => (
+                                                <option key={`${project.id}:${s.id}`} value={`${project.id}:${s.id}`}>
+                                                  {s.id}
+                                                </option>
+                                              ))}
+                                            </optgroup>
+                                          );
+                                        })}
                                     </select>
                                   </TooltipTrigger>
                                   <TooltipContent>Assign session to this slot</TooltipContent>
@@ -3587,11 +3697,11 @@ export function TerminalView() {
                             <div className="min-h-0 flex-1">
                               {session ? (
                                 <TerminalPane
-                                  key={`${selectedProjectId}:${session.id}`}
+                                  key={`${slotRef!.projectId}:${session.id}`}
                                   ref={(instance) => {
                                     terminalRefs.current[session.id] = instance;
                                   }}
-                                  projectId={selectedProjectId}
+                                  projectId={slotRef!.projectId}
                                   sessionId={session.id}
                                   onActivate={() => {
                                     setSelectedSessionId(session.id);
@@ -3613,7 +3723,7 @@ export function TerminalView() {
                                       return { ...previous, [session.id]: state };
                                     });
                                   }}
-                                  onSessionUnavailable={handleSessionUnavailable}
+                                  onSessionUnavailable={(sessionId, reason) => handleSessionUnavailable(slotRef!.projectId, sessionId, reason)}
                                 />
                               ) : (
                                 <div className="flex h-full min-h-0 items-center justify-center text-center text-sm text-muted-foreground">

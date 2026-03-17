@@ -12,18 +12,15 @@
     "bin",
     "docs",
     "index.ts",
-    "scripts",
     "src",
     "README.md",
-    "tsconfig.json",
-    "compile.sh"
+    "tsconfig.json"
   ],
   "publishConfig": {
     "access": "public"
   },
   "scripts": {
     "dev": "BERM_PORT=3000 bun --hot src/server/index.ts",
-    "compile": "./compile.sh",
     "start": "bun src/cli.ts",
     "test": "bun test",
     "typecheck": "bunx tsc --noEmit"
