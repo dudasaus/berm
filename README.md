@@ -48,16 +48,11 @@ bunx @dudasaus/berm
 - Pass `--port <number>` or `-p <number>` to override the port.
 - Use `--help` to print CLI usage.
 
-## Compile
+## Publish
 
 ```bash
-bun run compile
+bun publish
 ```
-
-- Produces a standalone binary at `./berm`.
-- `compile.sh` can optionally move it to `~/.local/bin/berm` when run interactively.
-- The compiled binary uses the same CLI entrypoint as the published package.
-- Compilation is implemented in `scripts/compile.ts` using `Bun.build()` with the `bun-plugin-tailwind` plugin so frontend CSS is bundled correctly.
 
 ## Test
 
