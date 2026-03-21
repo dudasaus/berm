@@ -308,6 +308,14 @@ async function fetchHealth() {
   return response.json() as Promise<{ ok: boolean; now: string }>;
 }
 
+async function fetchVersion() {
+  const response = await fetch("/api/version");
+  if (!response.ok) {
+    throw new Error(`version request failed with ${response.status}`);
+  }
+  return response.json() as Promise<{ version: string; commitHash: string }>;
+}
+
 async function fetchProjects() {
   const response = await fetch("/api/projects");
   if (!response.ok) {
@@ -1407,6 +1415,12 @@ export function TerminalView() {
     queryKey: ["health"],
     queryFn: fetchHealth,
     refetchInterval: 5_000,
+  });
+
+  const versionQuery = useQuery({
+    queryKey: ["version"],
+    queryFn: fetchVersion,
+    staleTime: Infinity,
   });
 
   const projectsQuery = useQuery({
@@ -2785,7 +2799,9 @@ export function TerminalView() {
         {isHeaderVisible ? (
           <header className="rounded-xl border border-border bg-card/70 px-4 py-2.5 shadow-sm backdrop-blur-sm">
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <h1 className="font-heading text-xl tracking-tight">Berm</h1>
+              <h1 className="font-heading text-xl tracking-tight">
+                Berm{versionQuery.data ? <span className="ml-2 text-xs font-mono text-muted-foreground">{versionQuery.data.version} ({versionQuery.data.commitHash})</span> : null}
+              </h1>
 
               <div className="flex flex-wrap items-center gap-2">
                 <Badge variant={badgeVariantForConnection(selectedConnectionState)} className="font-mono uppercase tracking-wide">

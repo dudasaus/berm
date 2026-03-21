@@ -1,4 +1,5 @@
 import app from "../web/index.html";
+import { version, commitHash } from "../build-info";
 import { serializeMessage, type ServerMessage } from "../shared/protocol";
 import {
   type CreateSessionResult,
@@ -131,6 +132,10 @@ export function buildHealthResponse(): Response {
     ok: true,
     now: new Date().toISOString(),
   });
+}
+
+export function buildVersionResponse(): Response {
+  return Response.json({ version, commitHash });
 }
 
 export function buildSessionResponse(
@@ -612,6 +617,7 @@ export function createServerConfig(
     routes: {
       "/": app,
       "/api/health": () => buildHealthResponse(),
+      "/api/version": () => buildVersionResponse(),
       "/api/projects": {
         GET: () => {
           return Response.json({ projects: manager.listProjects() });
