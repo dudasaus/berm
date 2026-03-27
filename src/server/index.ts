@@ -1,5 +1,48 @@
+import { join, basename } from "path";
+import { readdirSync } from "fs";
 import app from "../web/index.html";
 import { version, commitHash } from "../build-info";
+
+/**
+ * When running from a pre-built bundle (bun build --target=bun), the HTML
+ * import becomes a manifest with relative file paths. Bun.serve() resolves
+ * those paths relative to CWD, which breaks when the CLI is run from a
+ * different directory (e.g. via bunx). This helper detects the pre-built
+ * case and creates explicit routes using absolute paths derived from
+ * import.meta.dir (the directory containing the bundled cli.js).
+ */
+function resolveAppRoutes(): Record<string, any> {
+  if (!app.files) {
+    // Dev mode — Bun.serve() handles bundling at runtime
+    return { "/": app };
+  }
+
+  // Pre-built: resolve each file relative to the bundle's directory
+  const baseDir = import.meta.dir;
+  const routes: Record<string, any> = {};
+
+  for (const file of app.files) {
+    const absPath = join(baseDir, file.path);
+    if (file.loader === "html") {
+      routes["/"] = Bun.file(absPath);
+    } else {
+      const urlPath = "/" + file.path.replace(/^\.\//, "");
+      routes[urlPath] = Bun.file(absPath);
+    }
+  }
+
+  // Serve additional static assets (e.g. favicon) not listed in the manifest
+  const manifestPaths = new Set(app.files.map((f) => basename(f.path)));
+  const assetExts = new Set([".png", ".ico", ".svg", ".jpg", ".jpeg", ".gif", ".webp", ".woff", ".woff2"]);
+  for (const entry of readdirSync(baseDir)) {
+    const ext = entry.slice(entry.lastIndexOf("."));
+    if (assetExts.has(ext) && !manifestPaths.has(entry)) {
+      routes["/" + entry] = Bun.file(join(baseDir, entry));
+    }
+  }
+
+  return routes;
+}
 import { serializeMessage, type ServerMessage } from "../shared/protocol";
 import {
   type CreateSessionResult,
@@ -615,7 +658,7 @@ export function createServerConfig(
 ): ServerConfig {
   return {
     routes: {
-      "/": app,
+      ...resolveAppRoutes(),
       "/api/health": () => buildHealthResponse(),
       "/api/version": () => buildVersionResponse(),
       "/api/projects": {
