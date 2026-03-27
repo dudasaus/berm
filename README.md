@@ -54,6 +54,8 @@ bunx @dudasaus/berm
 bun publish
 ```
 
+The published CLI now ships prebuilt frontend assets from `dist/` so `bunx @dudasaus/berm` does not depend on the caller's local `bunfig.toml` or Tailwind plugin setup.
+
 ## Test
 
 ```bash

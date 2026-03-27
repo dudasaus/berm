@@ -1,6 +1,12 @@
 #!/usr/bin/env bun
 
-import { runCli } from "../src/cli.ts";
+let runCli: typeof import("../src/cli.ts").runCli;
+
+try {
+  ({ runCli } = await import("../dist/cli.js"));
+} catch {
+  ({ runCli } = await import("../src/cli.ts"));
+}
 
 const exitCode = await runCli(Bun.argv.slice(2));
 if (exitCode !== 0) {

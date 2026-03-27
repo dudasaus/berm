@@ -19,6 +19,7 @@ A project maps to a real directory path, and each project can contain many termi
 - CLI entrypoint: `bin/berm` -> `src/cli.ts`
 - Server runtime: `Bun.serve()` in `src/server/index.ts`
 - Frontend runtime: React app mounted from `src/web/index.html` and `src/web/main.tsx`
+- Published package runtime: `prepack` builds `dist/cli.js` plus hashed frontend assets with `bun-plugin-tailwind`, and `bin/berm` prefers the built CLI when present
 - Terminal backend: `TerminalSessionManager` in `src/server/terminal-session.ts`
 - Registry persistence: JSON file managed by `src/server/session-registry.ts`
 - Protocol contract: `src/shared/protocol.ts`
