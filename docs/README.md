@@ -17,6 +17,9 @@ A project maps to a real directory path, and each project can contain many termi
 ## Runtime Architecture
 
 - CLI entrypoint: `bin/berm` -> `src/cli.ts`
+- CLI behavior:
+  - no subcommand / `daemon start`: start the Berm server
+  - `daemon status`, `projects ...`, `sessions ...`: act as an HTTP client against the running Berm server
 - Server runtime: `Bun.serve()` in `src/server/index.ts`
 - Frontend runtime: React app mounted from `src/web/index.html` and `src/web/main.tsx`
 - Published package runtime: `prepack` builds `dist/cli.js` plus hashed frontend assets with `bun-plugin-tailwind`, and `bin/berm` prefers the built CLI when present
@@ -38,6 +41,12 @@ Responsibilities:
 - Exposes GitHub PR/CI sync API for session tiles (`gh`-powered, stale-while-revalidate cached)
 - Handles WebSocket upgrades for terminal streams
 - Converts manager errors into structured JSON responses
+
+Binding behavior:
+
+- Defaults to `127.0.0.1:3000`
+- Host can be overridden with `BERM_HOST` / `COMMAND_CENTER_HOST` or CLI `--host`
+- Port can be overridden with `BERM_PORT` / `COMMAND_CENTER_PORT` or CLI `--port`
 
 ### 2. TerminalSessionManager
 
@@ -112,9 +121,22 @@ Validation rules for selection:
 
 ## API Surface
 
+The control API is exposed under both:
+
+- `/api/...` for existing UI compatibility
+- `/api/v1/...` as the stable external/automation namespace
+
+Agent and CLI integrations should prefer `/api/v1/...`.
+
 ### Health
 
 - `GET /api/health`
+- `GET /api/v1/health`
+
+### Version
+
+- `GET /api/version`
+- `GET /api/v1/version`
 
 ### Projects
 
@@ -123,10 +145,12 @@ Validation rules for selection:
 - `PATCH /api/projects/:id` with optional `{ worktreeEnabled, worktreeParentPath, worktreeHookCommand, worktreeHookTimeoutMs }`
 - `POST /api/projects/pick` (native folder picker on macOS)
 - `DELETE /api/projects/:id` (deletes project + all sessions)
+- Same routes are also available under `/api/v1/...`
 
 ### Sessions
 
 - `GET /api/sessions` (all sessions across all projects)
+- `GET /api/v1/sessions` (all sessions across all projects)
 
 ### Sessions (project-scoped)
 
@@ -156,10 +180,12 @@ Validation rules for selection:
 - `GET /api/projects/:projectId/sessions/:id`
 - `PATCH /api/projects/:projectId/sessions/:id` with `{ lifecycleState }`
 - `DELETE /api/projects/:projectId/sessions/:id`
+- Same routes are also available under `/api/v1/...`
 
 ### WebSocket
 
 - `GET /ws/terminal?projectId=<id>&sessionId=<id>` (upgrade)
+- `GET /api/v1/ws/terminal?projectId=<id>&sessionId=<id>` (upgrade)
 
 ## Terminal Protocol
 

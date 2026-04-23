@@ -146,6 +146,7 @@ export interface SessionManagerLike {
 interface CreateServerOptions {
   manager?: SessionManagerLike;
   pickProjectDirectory?: () => Response;
+  host?: string;
   port?: number;
 }
 
@@ -652,221 +653,237 @@ function buildGitHubSyncResponse(manager: SessionManagerLike, projectId: string)
   };
 }
 
+function prefixRoutes(prefix: string, routes: Record<string, unknown>): Record<string, unknown> {
+  const prefixed: Record<string, unknown> = {};
+  for (const [path, handler] of Object.entries(routes)) {
+    prefixed[`${prefix}${path}`] = handler;
+  }
+  return prefixed;
+}
+
 export function createServerConfig(
   manager: SessionManagerLike,
   openProjectPicker: () => Response = pickProjectDirectory,
 ): ServerConfig {
+  const apiRoutes: Record<string, unknown> = {
+    "/health": () => buildHealthResponse(),
+    "/version": () => buildVersionResponse(),
+    "/projects": {
+      GET: () => {
+        return Response.json({ projects: manager.listProjects() });
+      },
+    },
+    "/projects/select": {
+      POST: async (req: Request) => {
+        try {
+          const body = (await req.json().catch(() => ({}))) as { path?: string };
+          const path = typeof body.path === "string" ? body.path : "";
+          const project = manager.selectProject(path);
+          return Response.json(project, { status: 201 });
+        } catch (error) {
+          return errorResponse(error);
+        }
+      },
+    },
+    "/projects/:id": {
+      PATCH: async (req: Bun.BunRequest<"/projects/:id">) => {
+        try {
+          const body = (await req.json().catch(() => ({}))) as UpdateProjectRequest;
+          const project = manager.updateProject(req.params.id, body);
+          return Response.json(project);
+        } catch (error) {
+          return errorResponse(error);
+        }
+      },
+      DELETE: (req: Bun.BunRequest<"/projects/:id">) => {
+        try {
+          const deleted = manager.deleteProject(req.params.id);
+          if (!deleted) {
+            return Response.json({ error: "Project not found" }, { status: 404 });
+          }
+
+          return Response.json({ ok: true });
+        } catch (error) {
+          return errorResponse(error);
+        }
+      },
+    },
+    "/projects/pick": {
+      POST: () => {
+        return openProjectPicker();
+      },
+    },
+    "/sessions": {
+      GET: () => {
+        return Response.json({ sessions: manager.listAllSessions() });
+      },
+    },
+    "/projects/:projectId/sessions": {
+      GET: (req: Bun.BunRequest<"/projects/:projectId/sessions">) => {
+        const project = manager.getProject(req.params.projectId);
+        if (!project) {
+          return Response.json({ error: "Project not found" }, { status: 404 });
+        }
+
+        return Response.json({ sessions: manager.listSessions(req.params.projectId) });
+      },
+      POST: async (req: Bun.BunRequest<"/projects/:projectId/sessions">) => {
+        try {
+          const body = (await req.json().catch(() => ({}))) as {
+            mode?: unknown;
+            name?: unknown;
+            branchName?: unknown;
+          };
+
+          let request: CreateSessionRequest | undefined;
+          if (body.mode === "worktree") {
+            request = {
+              mode: "worktree",
+              branchName: typeof body.branchName === "string" ? body.branchName : "",
+            };
+          } else if (typeof body.mode === "undefined" || body.mode === "main") {
+            request = {
+              mode: "main",
+              name: typeof body.name === "string" ? body.name : undefined,
+            };
+          } else {
+            request = body as CreateSessionRequest;
+          }
+
+          const created = manager.createSession(req.params.projectId, request);
+          return Response.json(created, { status: 201 });
+        } catch (error) {
+          return errorResponse(error);
+        }
+      },
+    },
+    "/projects/:projectId/sessions/import-worktrees": {
+      GET: (req: Bun.BunRequest<"/projects/:projectId/sessions/import-worktrees">) => {
+        try {
+          return Response.json(manager.listImportWorktreeCandidates(req.params.projectId));
+        } catch (error) {
+          return errorResponse(error);
+        }
+      },
+      POST: async (req: Bun.BunRequest<"/projects/:projectId/sessions/import-worktrees">) => {
+        try {
+          const body = (await req.json().catch(() => ({}))) as {
+            workspacePaths?: unknown;
+          };
+
+          const request: ImportWorktreeSessionsRequest = {
+            workspacePaths: Array.isArray(body.workspacePaths)
+              ? body.workspacePaths.filter((value): value is string => typeof value === "string")
+              : undefined,
+          };
+          return Response.json(manager.importWorktreeSessions(req.params.projectId, request));
+        } catch (error) {
+          return errorResponse(error);
+        }
+      },
+    },
+    "/projects/:projectId/sessions/github-sync": {
+      GET: (req: Bun.BunRequest<"/projects/:projectId/sessions/github-sync">) => {
+        const project = manager.getProject(req.params.projectId);
+        if (!project) {
+          return Response.json({ error: "Project not found" }, { status: 404 });
+        }
+
+        return Response.json(buildGitHubSyncResponse(manager, req.params.projectId));
+      },
+    },
+    "/projects/:projectId/sessions/worktree-hook-decision": {
+      POST: async (req: Bun.BunRequest<"/projects/:projectId/sessions/worktree-hook-decision">) => {
+        try {
+          const body = (await req.json().catch(() => ({}))) as {
+            decisionToken?: unknown;
+            decision?: unknown;
+          };
+
+          const result = manager.resolveWorktreeHookDecision(req.params.projectId, {
+            decisionToken: typeof body.decisionToken === "string" ? body.decisionToken : "",
+            decision: body.decision as ResolveWorktreeHookDecisionRequest["decision"],
+          });
+
+          if (result.action === "continue") {
+            return Response.json(result, { status: 201 });
+          }
+
+          return Response.json(result);
+        } catch (error) {
+          return errorResponse(error);
+        }
+      },
+    },
+    "/projects/:projectId/sessions/:id": {
+      GET: (req: Bun.BunRequest<"/projects/:projectId/sessions/:id">) =>
+        buildSessionResponse(manager, req.params.projectId, req.params.id),
+      PATCH: async (req: Bun.BunRequest<"/projects/:projectId/sessions/:id">) => {
+        try {
+          const body = (await req.json().catch(() => ({}))) as {
+            lifecycleState?: unknown;
+          };
+          const session = manager.updateSessionLifecycleState(req.params.projectId, req.params.id, {
+            lifecycleState: body.lifecycleState as UpdateSessionLifecycleRequest["lifecycleState"],
+          });
+          return Response.json(session);
+        } catch (error) {
+          return errorResponse(error);
+        }
+      },
+      DELETE: (req: Bun.BunRequest<"/projects/:projectId/sessions/:id">) => {
+        try {
+          const deleted = manager.deleteSession(req.params.projectId, req.params.id);
+          if (!deleted) {
+            return Response.json({ error: "Session not found" }, { status: 404 });
+          }
+
+          return Response.json({ ok: true });
+        } catch (error) {
+          return errorResponse(error);
+        }
+      },
+    },
+  };
+
+  const terminalRoute = (req: Request, serverRef: Pick<Bun.Server<WebSocketData>, "upgrade">) => {
+    const url = new URL(req.url);
+    const projectId = url.searchParams.get("projectId")?.trim();
+    if (!projectId) {
+      return Response.json({ error: "projectId query parameter is required" }, { status: 400 });
+    }
+
+    const sessionId = url.searchParams.get("sessionId")?.trim();
+    if (!sessionId) {
+      return Response.json({ error: "sessionId query parameter is required" }, { status: 400 });
+    }
+
+    if (!manager.hasSession(projectId, sessionId)) {
+      return Response.json({ error: "Session not found" }, { status: 404 });
+    }
+
+    const upgraded = serverRef.upgrade(req, {
+      data: {
+        projectId,
+        sessionId,
+        clientId: crypto.randomUUID(),
+      },
+    });
+
+    if (!upgraded) {
+      return Response.json({ error: "WebSocket upgrade failed" }, { status: 400 });
+    }
+
+    return undefined;
+  };
+
   return {
     routes: {
       ...resolveAppRoutes(),
-      "/api/health": () => buildHealthResponse(),
-      "/api/version": () => buildVersionResponse(),
-      "/api/projects": {
-        GET: () => {
-          return Response.json({ projects: manager.listProjects() });
-        },
-      },
-      "/api/projects/select": {
-        POST: async (req: Request) => {
-          try {
-            const body = (await req.json().catch(() => ({}))) as { path?: string };
-            const path = typeof body.path === "string" ? body.path : "";
-            const project = manager.selectProject(path);
-            return Response.json(project, { status: 201 });
-          } catch (error) {
-            return errorResponse(error);
-          }
-        },
-      },
-      "/api/projects/:id": {
-        PATCH: async (req: Bun.BunRequest<"/api/projects/:id">) => {
-          try {
-            const body = (await req.json().catch(() => ({}))) as UpdateProjectRequest;
-            const project = manager.updateProject(req.params.id, body);
-            return Response.json(project);
-          } catch (error) {
-            return errorResponse(error);
-          }
-        },
-        DELETE: (req: Bun.BunRequest<"/api/projects/:id">) => {
-          try {
-            const deleted = manager.deleteProject(req.params.id);
-            if (!deleted) {
-              return Response.json({ error: "Project not found" }, { status: 404 });
-            }
-
-            return Response.json({ ok: true });
-          } catch (error) {
-            return errorResponse(error);
-          }
-        },
-      },
-      "/api/projects/pick": {
-        POST: () => {
-          return openProjectPicker();
-        },
-      },
-      "/api/sessions": {
-        GET: () => {
-          return Response.json({ sessions: manager.listAllSessions() });
-        },
-      },
-      "/api/projects/:projectId/sessions": {
-        GET: (req: Bun.BunRequest<"/api/projects/:projectId/sessions">) => {
-          const project = manager.getProject(req.params.projectId);
-          if (!project) {
-            return Response.json({ error: "Project not found" }, { status: 404 });
-          }
-
-          return Response.json({ sessions: manager.listSessions(req.params.projectId) });
-        },
-        POST: async (req: Bun.BunRequest<"/api/projects/:projectId/sessions">) => {
-          try {
-            const body = (await req.json().catch(() => ({}))) as {
-              mode?: unknown;
-              name?: unknown;
-              branchName?: unknown;
-            };
-
-            let request: CreateSessionRequest | undefined;
-            if (body.mode === "worktree") {
-              request = {
-                mode: "worktree",
-                branchName: typeof body.branchName === "string" ? body.branchName : "",
-              };
-            } else if (typeof body.mode === "undefined" || body.mode === "main") {
-              request = {
-                mode: "main",
-                name: typeof body.name === "string" ? body.name : undefined,
-              };
-            } else {
-              request = body as CreateSessionRequest;
-            }
-
-            const created = manager.createSession(req.params.projectId, request);
-            return Response.json(created, { status: 201 });
-          } catch (error) {
-            return errorResponse(error);
-          }
-        },
-      },
-      "/api/projects/:projectId/sessions/import-worktrees": {
-        GET: (req: Bun.BunRequest<"/api/projects/:projectId/sessions/import-worktrees">) => {
-          try {
-            return Response.json(manager.listImportWorktreeCandidates(req.params.projectId));
-          } catch (error) {
-            return errorResponse(error);
-          }
-        },
-        POST: async (req: Bun.BunRequest<"/api/projects/:projectId/sessions/import-worktrees">) => {
-          try {
-            const body = (await req.json().catch(() => ({}))) as {
-              workspacePaths?: unknown;
-            };
-
-            const request: ImportWorktreeSessionsRequest = {
-              workspacePaths: Array.isArray(body.workspacePaths)
-                ? body.workspacePaths.filter((value): value is string => typeof value === "string")
-                : undefined,
-            };
-            return Response.json(manager.importWorktreeSessions(req.params.projectId, request));
-          } catch (error) {
-            return errorResponse(error);
-          }
-        },
-      },
-      "/api/projects/:projectId/sessions/github-sync": {
-        GET: (req: Bun.BunRequest<"/api/projects/:projectId/sessions/github-sync">) => {
-          const project = manager.getProject(req.params.projectId);
-          if (!project) {
-            return Response.json({ error: "Project not found" }, { status: 404 });
-          }
-
-          return Response.json(buildGitHubSyncResponse(manager, req.params.projectId));
-        },
-      },
-      "/api/projects/:projectId/sessions/worktree-hook-decision": {
-        POST: async (req: Bun.BunRequest<"/api/projects/:projectId/sessions/worktree-hook-decision">) => {
-          try {
-            const body = (await req.json().catch(() => ({}))) as {
-              decisionToken?: unknown;
-              decision?: unknown;
-            };
-
-            const result = manager.resolveWorktreeHookDecision(req.params.projectId, {
-              decisionToken: typeof body.decisionToken === "string" ? body.decisionToken : "",
-              decision: body.decision as ResolveWorktreeHookDecisionRequest["decision"],
-            });
-
-            if (result.action === "continue") {
-              return Response.json(result, { status: 201 });
-            }
-
-            return Response.json(result);
-          } catch (error) {
-            return errorResponse(error);
-          }
-        },
-      },
-      "/api/projects/:projectId/sessions/:id": {
-        GET: (req: Bun.BunRequest<"/api/projects/:projectId/sessions/:id">) =>
-          buildSessionResponse(manager, req.params.projectId, req.params.id),
-        PATCH: async (req: Bun.BunRequest<"/api/projects/:projectId/sessions/:id">) => {
-          try {
-            const body = (await req.json().catch(() => ({}))) as {
-              lifecycleState?: unknown;
-            };
-            const session = manager.updateSessionLifecycleState(req.params.projectId, req.params.id, {
-              lifecycleState: body.lifecycleState as UpdateSessionLifecycleRequest["lifecycleState"],
-            });
-            return Response.json(session);
-          } catch (error) {
-            return errorResponse(error);
-          }
-        },
-        DELETE: (req: Bun.BunRequest<"/api/projects/:projectId/sessions/:id">) => {
-          try {
-            const deleted = manager.deleteSession(req.params.projectId, req.params.id);
-            if (!deleted) {
-              return Response.json({ error: "Session not found" }, { status: 404 });
-            }
-
-            return Response.json({ ok: true });
-          } catch (error) {
-            return errorResponse(error);
-          }
-        },
-      },
-      "/ws/terminal": (req: Request, serverRef: Pick<Bun.Server<WebSocketData>, "upgrade">) => {
-        const url = new URL(req.url);
-        const projectId = url.searchParams.get("projectId")?.trim();
-        if (!projectId) {
-          return Response.json({ error: "projectId query parameter is required" }, { status: 400 });
-        }
-
-        const sessionId = url.searchParams.get("sessionId")?.trim();
-        if (!sessionId) {
-          return Response.json({ error: "sessionId query parameter is required" }, { status: 400 });
-        }
-
-        if (!manager.hasSession(projectId, sessionId)) {
-          return Response.json({ error: "Session not found" }, { status: 404 });
-        }
-
-        const upgraded = serverRef.upgrade(req, {
-          data: {
-            projectId,
-            sessionId,
-            clientId: crypto.randomUUID(),
-          },
-        });
-
-        if (!upgraded) {
-          return Response.json({ error: "WebSocket upgrade failed" }, { status: 400 });
-        }
-
-        return undefined;
-      },
+      ...prefixRoutes("/api", apiRoutes),
+      ...prefixRoutes("/api/v1", apiRoutes),
+      "/ws/terminal": terminalRoute,
+      "/api/v1/ws/terminal": terminalRoute,
     },
     websocket: {
       data: {} as WebSocketData,
@@ -899,12 +916,14 @@ export function createServerConfig(
 
 export function createServer(options: number | CreateServerOptions = {}) {
   const normalized: CreateServerOptions = typeof options === "number" ? { port: options } : options;
+  const host = normalized.host ?? envWithLegacy("BERM_HOST", "COMMAND_CENTER_HOST") ?? "127.0.0.1";
   const port = normalized.port ?? Number(envWithLegacy("BERM_PORT", "COMMAND_CENTER_PORT") ?? 3000);
   const manager = normalized.manager ?? createDefaultManager();
   const openProjectPicker = normalized.pickProjectDirectory ?? pickProjectDirectory;
   const config = createServerConfig(manager, openProjectPicker);
 
   const serverOptions = {
+    hostname: host,
     port,
     routes: config.routes,
     websocket: {

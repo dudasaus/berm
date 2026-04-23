@@ -304,9 +304,13 @@ describe("server config routes and websocket", () => {
 
     const healthResponse = (routes["/api/health"] as () => Response)();
     expect(healthResponse.status).toBe(200);
+    const versionedHealthResponse = (routes["/api/v1/health"] as () => Response)();
+    expect(versionedHealthResponse.status).toBe(200);
 
     const projectsResponse = (routes["/api/projects"] as { GET: () => Response }).GET();
     expect(projectsResponse.status).toBe(200);
+    const versionedProjectsResponse = (routes["/api/v1/projects"] as { GET: () => Response }).GET();
+    expect(versionedProjectsResponse.status).toBe(200);
 
     const selectResponse = await (routes["/api/projects/select"] as { POST: (req: Request) => Promise<Response> }).POST(
       new Request("http://localhost/api/projects/select", {
@@ -316,6 +320,16 @@ describe("server config routes and websocket", () => {
       }),
     );
     expect(selectResponse.status).toBe(201);
+    const versionedSelectResponse = await (routes["/api/v1/projects/select"] as {
+      POST: (req: Request) => Promise<Response>;
+    }).POST(
+      new Request("http://localhost/api/v1/projects/select", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ path: "/tmp/versioned-project" }),
+      }),
+    );
+    expect(versionedSelectResponse.status).toBe(201);
 
     const pickResponse = (routes["/api/projects/pick"] as { POST: () => Response }).POST();
     expect(pickResponse.status).toBe(200);
@@ -482,6 +496,10 @@ describe("server config routes and websocket", () => {
       req: Request,
       server: { upgrade: (req: Request, data?: { data: unknown }) => boolean },
     ) => Response | undefined;
+    const versionedWsRoute = routes["/api/v1/ws/terminal"] as (
+      req: Request,
+      server: { upgrade: (req: Request, data?: { data: unknown }) => boolean },
+    ) => Response | undefined;
 
     const noParamsResponse = wsRoute(new Request("http://localhost/ws/terminal"), {
       upgrade: () => true,
@@ -528,6 +546,14 @@ describe("server config routes and websocket", () => {
     );
     expect(upgradedResponse).toBeUndefined();
     expect(upgradedData).not.toBeNull();
+
+    const versionedUpgradedResponse = versionedWsRoute(
+      new Request("http://localhost/api/v1/ws/terminal?projectId=p1&sessionId=live"),
+      {
+        upgrade: () => true,
+      },
+    );
+    expect(versionedUpgradedResponse).toBeUndefined();
 
     const upgradeFailedResponse = wsRoute(
       new Request("http://localhost/ws/terminal?projectId=p1&sessionId=live"),

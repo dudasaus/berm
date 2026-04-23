@@ -44,9 +44,25 @@ bun run dev
 bunx @dudasaus/berm
 ```
 
-- Starts Berm on port `3000` by default.
-- Pass `--port <number>` or `-p <number>` to override the port.
+- Starts Berm bound to `127.0.0.1:3000` by default.
+- Pass `--host <hostname>` / `-H <hostname>` and `--port <number>` / `-p <number>` to override the bind address.
+- `berm daemon start` is an explicit alias for starting the server.
+- `berm daemon status` checks the local control plane and supports `--json`.
+- `berm projects list`, `berm projects select <path>`, `berm sessions list --project <id>`, `berm sessions create ...`, `berm sessions get ...`, `berm sessions delete ...`, and `berm sessions lifecycle set ...` all talk to the running Berm server.
+- Use `--json` on client commands for agent-friendly output.
 - Use `--help` to print CLI usage.
+
+Examples:
+
+```bash
+berm daemon start
+berm daemon status --json
+berm projects list --json
+berm projects select /absolute/path/to/repo
+berm sessions create --project proj_123 --name agent-1
+berm sessions create --project proj_123 --worktree --branch feature/external-api
+berm sessions lifecycle set --project proj_123 --session agent-1 --state implementing
+```
 
 ## Publish
 
