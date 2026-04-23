@@ -3557,6 +3557,16 @@ export function TerminalView() {
                           : isActiveSlot
                             ? "border-amber-300/60 bg-amber-300/15 text-amber-100"
                             : "border-border/70 bg-card/65 text-muted-foreground";
+                        const slotSessionLabelClass = isFocusedSlot
+                          ? "text-amber-50"
+                          : isActiveSlot
+                            ? "text-amber-100"
+                            : "text-foreground";
+                        const slotSubtitleClass = isFocusedSlot
+                          ? "text-amber-100/70"
+                          : isActiveSlot
+                            ? "text-amber-50/70"
+                            : "text-muted-foreground";
                         const slotStatusLabel = isFocusedSlot ? "Focused" : isActiveSlot ? "Active" : "Live";
                         const slotStatusTooltip = isFocusedSlot
                           ? "Focused: this slot is in focus mode and is the only pane being shown."
@@ -3597,11 +3607,11 @@ export function TerminalView() {
                                     </Tooltip>
                                   ) : null}
                                 </div>
-                                <p className="truncate font-mono text-xs font-semibold text-foreground">
+                                <p className={`truncate font-mono text-xs font-semibold ${slotSessionLabelClass}`}>
                                   {session ? session.id : "No session selected"}
                                 </p>
                                 {slotProjectName ? (
-                                  <p className="truncate font-mono text-[10px] text-muted-foreground">
+                                  <p className={`truncate font-mono text-[10px] ${slotSubtitleClass}`}>
                                     {slotProjectName}
                                   </p>
                                 ) : null}
