@@ -1,6 +1,6 @@
 {
   "name": "@dudasaus/berm",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Web terminal workspace manager powered by Bun, tmux, and React.",
   "module": "index.ts",
   "type": "module",
