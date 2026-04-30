@@ -121,6 +121,22 @@ const githubSyncCache = new Map<
 >();
 const textDecoder = new TextDecoder();
 
+type SpawnSyncResultLike = {
+  stdout?: string | Uint8Array;
+  stderr?: string | Uint8Array;
+  exitCode: number;
+};
+
+type SpawnSyncLike = (
+  cmd: string[],
+  options?: {
+    stdout?: "pipe";
+    stderr?: "pipe";
+  },
+) => SpawnSyncResultLike;
+
+type EnvLike = Record<string, string | undefined>;
+
 export interface SessionManagerLike {
   listProjects(): ProjectMetadata[];
   selectProject(path: string): ProjectMetadata;
@@ -210,32 +226,31 @@ function errorResponse(error: unknown): Response {
   return Response.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });
 }
 
-function pickProjectDirectory(): Response {
-  if (process.platform !== "darwin") {
-    return Response.json(
-      { error: "Native directory picker is currently supported on macOS only", code: "PROJECT_PICK_UNSUPPORTED" },
-      { status: 501 },
-    );
+function decodeSpawnOutput(output: string | Uint8Array | undefined): string {
+  if (typeof output === "string") {
+    return output;
+  }
+  if (!output) {
+    return "";
   }
 
-  const result = Bun.spawnSync(
-    [
-      "osascript",
-      "-e",
-      'POSIX path of (choose folder with prompt "Select Berm Project")',
-    ],
-    {
-      stdout: "pipe",
-      stderr: "pipe",
-    },
-  );
+  return textDecoder.decode(output);
+}
 
-  const stdout = new TextDecoder().decode(result.stdout).trim();
-  const stderr = new TextDecoder().decode(result.stderr).trim();
+function failedToLaunchPicker(error: unknown): Response {
+  const message = error instanceof Error ? error.message : String(error);
+  return Response.json(
+    { error: message || "Unable to open native project picker", code: "PROJECT_PICK_FAILED" },
+    { status: 500 },
+  );
+}
+
+function mapPickerProcessResult(result: SpawnSyncResultLike, cancelMatcher: (stderr: string) => boolean): Response {
+  const stdout = decodeSpawnOutput(result.stdout).trim();
+  const stderr = decodeSpawnOutput(result.stderr).trim();
 
   if (result.exitCode !== 0) {
-    const lowered = stderr.toLowerCase();
-    if (lowered.includes("user canceled")) {
+    if (cancelMatcher(stderr)) {
       return Response.json({ error: "Project picker cancelled", code: "PROJECT_PICK_CANCELLED" }, { status: 400 });
     }
 
@@ -250,6 +265,136 @@ function pickProjectDirectory(): Response {
   }
 
   return Response.json({ path: stdout });
+}
+
+function pickProjectDirectoryMacOS(spawnSync: SpawnSyncLike): Response {
+  try {
+    const result = spawnSync(
+      ["osascript", "-e", 'POSIX path of (choose folder with prompt "Select Berm Project")'],
+      {
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+
+    return mapPickerProcessResult(result, (stderr) => stderr.toLowerCase().includes("user canceled"));
+  } catch (error) {
+    return failedToLaunchPicker(error);
+  }
+}
+
+function runWindowsPicker(spawnSync: SpawnSyncLike, executables: string[]): SpawnSyncResultLike | Response {
+  const script = [
+    "Add-Type -AssemblyName System.Windows.Forms",
+    "$dialog = New-Object System.Windows.Forms.FolderBrowserDialog",
+    '$dialog.Description = "Select Berm Project"',
+    "$dialog.UseDescriptionForTitle = $true",
+    'if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::Out.Write($dialog.SelectedPath); exit 0 }',
+    '[Console]::Error.Write("PROJECT_PICK_CANCELLED")',
+    "exit 2",
+  ].join("; ");
+
+  for (const executable of executables) {
+    try {
+      return spawnSync([executable, "-NoProfile", "-STA", "-Command", script], {
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+    } catch (error) {
+      if (executable === executables.at(-1)) {
+        return failedToLaunchPicker(error);
+      }
+    }
+  }
+
+  return Response.json(
+    { error: "Unable to open native project picker", code: "PROJECT_PICK_FAILED" },
+    { status: 500 },
+  );
+}
+
+function isResponse(value: SpawnSyncResultLike | Response): value is Response {
+  return value instanceof Response;
+}
+
+function pickProjectDirectoryWindows(spawnSync: SpawnSyncLike): Response {
+  const result = runWindowsPicker(spawnSync, ["powershell", "pwsh"]);
+  if (isResponse(result)) {
+    return result;
+  }
+
+  return mapPickerProcessResult(result, (stderr) => stderr.includes("PROJECT_PICK_CANCELLED"));
+}
+
+function isWsl(env: EnvLike): boolean {
+  return Boolean(env.WSL_DISTRO_NAME || env.WSL_INTEROP);
+}
+
+function pickProjectDirectoryWsl(spawnSync: SpawnSyncLike): Response {
+  const pickerResult = runWindowsPicker(spawnSync, ["powershell.exe", "pwsh.exe"]);
+  if (isResponse(pickerResult)) {
+    return pickerResult;
+  }
+
+  const stdout = decodeSpawnOutput(pickerResult.stdout).trim();
+  if (pickerResult.exitCode !== 0) {
+    return mapPickerProcessResult(pickerResult, (value) => value.includes("PROJECT_PICK_CANCELLED"));
+  }
+
+  if (!stdout) {
+    return Response.json({ error: "No project path returned from picker", code: "PROJECT_PICK_EMPTY" }, { status: 500 });
+  }
+
+  try {
+    const translated = spawnSync(["wslpath", "-a", stdout], {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const translatedStdout = decodeSpawnOutput(translated.stdout).trim();
+    const translatedStderr = decodeSpawnOutput(translated.stderr).trim();
+
+    if (translated.exitCode !== 0) {
+      return Response.json(
+        { error: translatedStderr || "Unable to translate Windows path for WSL", code: "PROJECT_PICK_FAILED" },
+        { status: 500 },
+      );
+    }
+
+    if (!translatedStdout) {
+      return Response.json({ error: "No project path returned from picker", code: "PROJECT_PICK_EMPTY" }, { status: 500 });
+    }
+
+    return Response.json({ path: translatedStdout });
+  } catch (error) {
+    return failedToLaunchPicker(error);
+  }
+}
+
+export function pickProjectDirectoryForPlatform(
+  platform: NodeJS.Platform,
+  spawnSync: SpawnSyncLike = Bun.spawnSync,
+  env: EnvLike = process.env,
+): Response {
+  if (platform === "darwin") {
+    return pickProjectDirectoryMacOS(spawnSync);
+  }
+
+  if (platform === "win32") {
+    return pickProjectDirectoryWindows(spawnSync);
+  }
+
+  if (platform === "linux" && isWsl(env)) {
+    return pickProjectDirectoryWsl(spawnSync);
+  }
+
+  return Response.json(
+    { error: "Native directory picker is currently supported on macOS, Windows, and WSL only", code: "PROJECT_PICK_UNSUPPORTED" },
+    { status: 501 },
+  );
+}
+
+function pickProjectDirectory(): Response {
+  return pickProjectDirectoryForPlatform(process.platform, Bun.spawnSync, process.env);
 }
 
 async function runCommand(args: string[], cwd: string): Promise<{ exitCode: number; stdout: string; stderr: string }> {

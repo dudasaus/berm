@@ -1,7 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { rmSync } from "node:fs";
 
-import { createServerConfig, type SessionManagerLike } from "../../src/server/index";
+import {
+  createServerConfig,
+  pickProjectDirectoryForPlatform,
+  type SessionManagerLike,
+} from "../../src/server/index";
 import {
   type CreateSessionResult,
   TerminalSessionManager,
@@ -295,6 +299,82 @@ class FakeSessionManager implements SessionManagerLike {
 
   async shutdown(): Promise<void> {}
 }
+
+describe("native project picker", () => {
+  test("supports Windows picker success", async () => {
+    const response = pickProjectDirectoryForPlatform("win32", () => ({
+      exitCode: 0,
+      stdout: "C:\\Users\\austin\\Projects\\berm\n",
+      stderr: "",
+    }));
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ path: "C:\\Users\\austin\\Projects\\berm" });
+  });
+
+  test("maps Windows picker cancel to PROJECT_PICK_CANCELLED", async () => {
+    const response = pickProjectDirectoryForPlatform("win32", () => ({
+      exitCode: 2,
+      stdout: "",
+      stderr: "PROJECT_PICK_CANCELLED",
+    }));
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({
+      error: "Project picker cancelled",
+      code: "PROJECT_PICK_CANCELLED",
+    });
+  });
+
+  test("supports WSL picker success and translates the selected path", async () => {
+    const commands: string[][] = [];
+    const response = pickProjectDirectoryForPlatform(
+      "linux",
+      (cmd) => {
+        commands.push(cmd);
+        if (cmd[0] === "powershell.exe") {
+          return {
+            exitCode: 0,
+            stdout: "C:\\Users\\austin\\Projects\\berm",
+            stderr: "",
+          };
+        }
+
+        return {
+          exitCode: 0,
+          stdout: "/mnt/c/Users/austin/Projects/berm\n",
+          stderr: "",
+        };
+      },
+      { WSL_DISTRO_NAME: "Ubuntu" },
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ path: "/mnt/c/Users/austin/Projects/berm" });
+    expect(commands).toEqual([
+      ["powershell.exe", "-NoProfile", "-STA", "-Command", expect.any(String)],
+      ["wslpath", "-a", "C:\\Users\\austin\\Projects\\berm"],
+    ]);
+  });
+
+  test("returns unsupported on unimplemented platforms", async () => {
+    const response = pickProjectDirectoryForPlatform(
+      "linux",
+      () => ({
+        exitCode: 0,
+        stdout: "/tmp/ignored",
+        stderr: "",
+      }),
+      {},
+    );
+
+    expect(response.status).toBe(501);
+    await expect(response.json()).resolves.toEqual({
+      error: "Native directory picker is currently supported on macOS, Windows, and WSL only",
+      code: "PROJECT_PICK_UNSUPPORTED",
+    });
+  });
+});
 
 describe("server config routes and websocket", () => {
   test("handles project and session CRUD handlers", async () => {

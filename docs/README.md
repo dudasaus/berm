@@ -143,7 +143,7 @@ Agent and CLI integrations should prefer `/api/v1/...`.
 - `GET /api/projects`
 - `POST /api/projects/select` with `{ path }`
 - `PATCH /api/projects/:id` with optional `{ worktreeEnabled, worktreeParentPath, worktreeHookCommand, worktreeHookTimeoutMs }`
-- `POST /api/projects/pick` (native folder picker on macOS)
+- `POST /api/projects/pick` (native folder picker on macOS, Windows, and WSL)
 - `DELETE /api/projects/:id` (deletes project + all sessions)
 - Same routes are also available under `/api/v1/...`
 
@@ -317,8 +317,8 @@ Optional post-create hook:
 ## Native Folder Picker
 
 - Endpoint: `POST /api/projects/pick`
-- Uses AppleScript (`osascript`) on macOS to open folder chooser
-- Returns picker-specific error codes for unsupported/cancel/failure paths
+- Uses AppleScript (`osascript`) on macOS, PowerShell folder dialog on Windows, and PowerShell + `wslpath` when running inside WSL
+- Returns picker-specific error codes for unsupported/cancel/failure/empty-result paths
 - Frontend also supports manual path entry fallback
 
 ## Testing
