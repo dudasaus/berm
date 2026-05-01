@@ -38,3 +38,5 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 
 # generated at publish time
 src/build-info.ts
+
+.dev/
