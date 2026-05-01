@@ -11,7 +11,7 @@ Web terminal app powered by Bun PTY + zsh on the backend and TanStack React + xt
 - Recent projects are persisted and reusable.
 - Deleting a project from the UI deletes all sessions in that project.
 - Projects can optionally enable git worktree mode.
-- In worktree mode, you can create sessions either in the main project root or in a new worktree branch.
+- In worktree mode, you can create sessions either in the main project root or in a new worktree branch from the UI or command palette.
 - You can manually import existing linked git worktrees via a selection dialog.
 - Worktree-enabled projects can define an optional post-create hook command + timeout.
 - Worktree parent directory selection uses the same in-app path picker instead of a native folder dialog.

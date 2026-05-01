@@ -11,6 +11,7 @@ export type TerminalActionId =
   | "project.delete.current"
   | "session.new.auto"
   | "session.new.custom"
+  | "session.new.worktree"
   | "session.import.worktrees"
   | "session.delete.current"
   | "session.reconnect"
@@ -24,6 +25,7 @@ export type TerminalActionId =
 export type TerminalActionGroup = "Project" | "Session" | "View";
 export type TerminalActionIcon =
   | "folder"
+  | "git-branch"
   | "plus"
   | "trash"
   | "refresh"
@@ -63,6 +65,8 @@ export interface TerminalActionConfirmation {
 export interface TerminalActionContext {
   selectedProjectId: string | null;
   selectedProjectName: string | null;
+  selectedProjectWorktreeEnabled: boolean;
+  selectedProjectWorktreeParentPath: string | null;
   selectedSessionId: string | null;
   selectedSessionName: string | null;
   selectedSessionLifecycleState: SessionLifecycleState | null;
@@ -84,6 +88,7 @@ export interface TerminalActionHandlers {
   pickProject: () => void | Promise<void>;
   createSessionAuto: () => void;
   createSessionCustom: () => void;
+  createSessionWorktree: () => void;
   importWorktrees: () => void;
   deleteProject: (projectId: string) => void;
   deleteSession: (request: { projectId: string; sessionId: string }) => void;
@@ -234,6 +239,32 @@ export const TERMINAL_ACTIONS: TerminalActionDefinition[] = [
     },
     run: (_context, handlers) => {
       handlers.createSessionCustom();
+    },
+  },
+  {
+    id: "session.new.worktree",
+    label: "New Worktree Session",
+    description: "Create a session in a new git worktree branch.",
+    group: "Session",
+    icon: "git-branch",
+    keywords: ["session", "new", "create", "worktree", "branch", "git"],
+    getAvailability: (context) => {
+      if (!context.selectedProjectId) {
+        return { enabled: false, disabledReason: "Select a project first" };
+      }
+      if (context.pending.createSession) {
+        return { enabled: false, disabledReason: "Session creation in progress" };
+      }
+      if (!context.selectedProjectWorktreeEnabled) {
+        return { enabled: false, disabledReason: "Enable worktree mode in project settings first" };
+      }
+      if (!context.selectedProjectWorktreeParentPath) {
+        return { enabled: false, disabledReason: "Set a worktree parent path in project settings first" };
+      }
+      return { enabled: true };
+    },
+    run: (_context, handlers) => {
+      handlers.createSessionWorktree();
     },
   },
   {

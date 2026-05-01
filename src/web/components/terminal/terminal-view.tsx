@@ -10,6 +10,7 @@ import {
   EyeOff,
   Flag,
   FolderOpen,
+  GitBranch,
   GitMerge,
   GitPullRequest,
   Hammer,
@@ -1015,6 +1016,8 @@ function renderActionIcon(icon: TerminalActionIcon) {
   switch (icon) {
     case "folder":
       return <FolderOpen className="h-4 w-4" />;
+    case "git-branch":
+      return <GitBranch className="h-4 w-4" />;
     case "plus":
       return <Plus className="h-4 w-4" />;
     case "trash":
@@ -2572,6 +2575,8 @@ export function TerminalView() {
     () => ({
       selectedProjectId,
       selectedProjectName: selectedProject?.name ?? null,
+      selectedProjectWorktreeEnabled: selectedProject?.worktreeEnabled === true,
+      selectedProjectWorktreeParentPath: selectedProject?.worktreeParentPath ?? null,
       selectedSessionId: actionTargetSession?.id ?? null,
       selectedSessionName: actionTargetSession?.id ?? null,
       selectedSessionLifecycleState: actionTargetSession?.lifecycleState ?? null,
@@ -2628,6 +2633,7 @@ export function TerminalView() {
     },
     createSessionAuto: handleCreateMainAutoSession,
     createSessionCustom: handleCreateMainNamedSession,
+    createSessionWorktree: handleCreateWorktreeSession,
     importWorktrees: handleImportWorktrees,
     deleteProject: deleteProjectById,
     deleteSession: deleteSessionById,
@@ -3043,14 +3049,14 @@ export function TerminalView() {
                             >
                               In main (custom name)
                             </DropdownMenuItem>
-                            {selectedProject?.worktreeEnabled ? (
-                              <DropdownMenuItem
-                                onSelect={handleCreateWorktreeSession}
-                                disabled={!selectedProject.worktreeParentPath}
-                              >
-                                In new worktree branch
-                              </DropdownMenuItem>
-                            ) : null}
+                            <DropdownMenuItem
+                              onSelect={() => {
+                                runAction("session.new.worktree", { source: "dropdown" });
+                              }}
+                              disabled={!getActionAvailability("session.new.worktree", { source: "dropdown" }).enabled}
+                            >
+                              In new worktree branch
+                            </DropdownMenuItem>
                             <DropdownMenuSeparator />
                             <DropdownMenuItem
                               onSelect={() => {

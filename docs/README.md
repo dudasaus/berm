@@ -227,7 +227,7 @@ Responsibilities:
 - Exposes a global command palette (`Cmd/Ctrl+K`) with session commands first, then project commands:
   - new project
   - delete project
-  - new session (auto/custom)
+  - new session (auto/custom/worktree branch)
   - import existing worktrees (opens selection dialog)
   - delete session
   - reconnect
@@ -255,7 +255,7 @@ Left pane structure:
 Session creation menu behavior:
 
 - Always offers main-session creation (auto/custom name)
-- For worktree-enabled projects, also offers create in a new worktree (manual branch name)
+- For worktree-enabled projects with a parent path, also offers create in a new worktree (manual branch name)
 - Also offers manual import of existing linked worktrees for the selected project (opens selection dialog)
 
 ### 2. TerminalPane
