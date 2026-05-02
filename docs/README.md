@@ -141,9 +141,11 @@ Agent and CLI integrations should prefer `/api/v1/...`.
 ### Projects
 
 - `GET /api/projects`
+- `GET /api/projects/picker`
+- `GET /api/projects/picker/suggest?q=<absolute-path-query>`
 - `POST /api/projects/select` with `{ path }`
 - `PATCH /api/projects/:id` with optional `{ worktreeEnabled, worktreeParentPath, worktreeHookCommand, worktreeHookTimeoutMs }`
-- `POST /api/projects/pick` (native folder picker on macOS, Windows, and WSL)
+- `POST /api/projects/pick` (legacy native folder picker route; main UI now uses the in-app picker)
 - `DELETE /api/projects/:id` (deletes project + all sessions)
 - Same routes are also available under `/api/v1/...`
 
@@ -314,12 +316,15 @@ Optional post-create hook:
 - Non-zero exit code or timeout returns `WORKTREE_HOOK_FAILED` with hook output and a `decisionToken`
 - Client must call the decision endpoint to abort/cleanup or continue creating the session
 
-## Native Folder Picker
+## Project Picker
 
-- Endpoint: `POST /api/projects/pick`
-- Uses AppleScript (`osascript`) on macOS, PowerShell folder dialog on Windows, and PowerShell + `wslpath` when running inside WSL
-- Returns picker-specific error codes for unsupported/cancel/failure/empty-result paths
-- Frontend also supports manual path entry fallback
+- Main UI uses an in-app directory picker with an absolute path input and fuzzy directory suggestions.
+- `GET /api/projects/picker` returns the default startup path used to seed the picker input.
+- `GET /api/projects/picker/suggest?q=<absolute-path-query>` returns ranked directory suggestions for the current input.
+- Final selection still goes through `POST /api/projects/select`, so all path validation stays centralized.
+- Legacy compatibility route: `POST /api/projects/pick`
+  - Uses AppleScript (`osascript`) on macOS, PowerShell folder dialog on Windows, and PowerShell + `wslpath` when running inside WSL
+  - Returns picker-specific error codes for unsupported/cancel/failure/empty-result paths
 
 ## Testing
 

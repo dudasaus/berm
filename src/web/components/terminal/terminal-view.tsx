@@ -72,6 +72,7 @@ import {
   type TerminalConnectionState,
   type TerminalPaneHandle,
 } from "./terminal-pane";
+import { ProjectPickerDialog } from "./project-picker-dialog";
 import type { TerminalStatusState } from "../../../shared/protocol";
 
 const STACK_LAYOUT_BREAKPOINT_PX = 1100;
@@ -286,6 +287,8 @@ type PendingActionConfirmation = {
   confirmation: TerminalActionConfirmation;
 };
 
+type ProjectPickerMode = "project" | "worktreeParent";
+
 class ApiRequestError extends Error {
   readonly status: number;
   readonly code?: string;
@@ -345,25 +348,6 @@ async function selectProject(path: string) {
   }
 
   return payload as ProjectMetadata;
-}
-
-async function pickProjectPath() {
-  const response = await fetch("/api/projects/pick", {
-    method: "POST",
-  });
-
-  const payload = (await response.json()) as { path?: string; error?: string; code?: string };
-  if (!response.ok) {
-    const error = payload.error ?? `project picker failed with ${response.status}`;
-    const code = payload.code ?? "PROJECT_PICK_FAILED";
-    throw new Error(`${code}: ${error}`);
-  }
-
-  if (!payload.path || typeof payload.path !== "string") {
-    throw new Error("PROJECT_PICK_EMPTY: No project path returned by picker");
-  }
-
-  return payload.path;
 }
 
 async function fetchSessions(projectId: string) {
@@ -1136,6 +1120,7 @@ export function TerminalView() {
     githubSync: createBackgroundTaskState(),
   }));
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(() => readStoredProjectId());
+  const [projectPickerMode, setProjectPickerMode] = useState<ProjectPickerMode | null>(null);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [activeWorkspaceSessionId, setActiveWorkspaceSessionId] = useState<string | null>(null);
   const [sessionOrder, setSessionOrder] = useState<string[]>([]);
@@ -2180,16 +2165,7 @@ export function TerminalView() {
   }, [closeCommandPalette, isCommandOpen, openCommandPalette, toggleSidebar]);
 
   const handlePickProject = async () => {
-    try {
-      const path = await pickProjectPath();
-      selectProjectMutation.mutate(path);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (message.startsWith("PROJECT_PICK_CANCELLED")) {
-        return;
-      }
-      toast.error(message);
-    }
+    setProjectPickerMode("project");
   };
 
   const deleteProjectById = (projectId: string) => {
@@ -2210,17 +2186,22 @@ export function TerminalView() {
   };
 
   const handlePickWorktreeParentPath = async () => {
-    try {
-      const path = await pickProjectPath();
-      setProjectSettingsParentPath(path);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (message.startsWith("PROJECT_PICK_CANCELLED")) {
+    setProjectPickerMode("worktreeParent");
+  };
+
+  const handleProjectPickerSubmit = useCallback(
+    async (path: string) => {
+      if (projectPickerMode === "worktreeParent") {
+        setProjectSettingsParentPath(path);
+        setProjectPickerMode(null);
         return;
       }
-      toast.error(message);
-    }
-  };
+
+      await selectProjectMutation.mutateAsync(path);
+      setProjectPickerMode(null);
+    },
+    [projectPickerMode, selectProjectMutation],
+  );
 
   const handleSaveProjectSettings = () => {
     if (!selectedProject) {
@@ -2599,7 +2580,7 @@ export function TerminalView() {
       isHeaderVisible,
       isActivityIndicatorsVisible,
       pending: {
-        pickProject: selectProjectMutation.isPending,
+        pickProject: projectPickerMode !== null || selectProjectMutation.isPending,
         createSession: createSessionMutation.isPending,
         importWorktrees:
           importWorktreeDialog !== null ||
@@ -2624,6 +2605,7 @@ export function TerminalView() {
       selectedProject,
       selectedProjectId,
       actionTargetSession,
+      projectPickerMode,
       selectProjectMutation.isPending,
       updateSessionLifecycleMutation.isPending,
     ],
@@ -3972,6 +3954,25 @@ export function TerminalView() {
           </Card>
         </div>
       ) : null}
+
+      <ProjectPickerDialog
+        open={projectPickerMode !== null}
+        title={projectPickerMode === "worktreeParent" ? "Pick Worktree Parent Directory" : "Pick Project Directory"}
+        description={
+          projectPickerMode === "worktreeParent"
+            ? "Choose an absolute parent directory for new git worktrees."
+            : "Type or paste an absolute path. Berm will suggest matching directories as you type."
+        }
+        submitLabel={projectPickerMode === "worktreeParent" ? "Use directory" : "Select project"}
+        pending={projectPickerMode === "project" ? selectProjectMutation.isPending : false}
+        initialPath={projectPickerMode === "worktreeParent" ? projectSettingsParentPath : undefined}
+        onOpenChange={(open) => {
+          if (!open) {
+            setProjectPickerMode(null);
+          }
+        }}
+        onSubmit={handleProjectPickerSubmit}
+      />
 
       {isProjectSettingsOpen && selectedProject ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4">

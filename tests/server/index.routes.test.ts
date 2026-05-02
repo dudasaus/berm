@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import {
   createServerConfig,
@@ -379,7 +381,7 @@ describe("native project picker", () => {
 describe("server config routes and websocket", () => {
   test("handles project and session CRUD handlers", async () => {
     const manager = new FakeSessionManager();
-    const config = createServerConfig(manager, () => Response.json({ path: "/tmp/picked-project" }));
+    const config = createServerConfig(manager, () => Response.json({ path: "/tmp/picked-project" }), "/tmp/berm-start");
     const routes = config.routes as Record<string, unknown>;
 
     const healthResponse = (routes["/api/health"] as () => Response)();
@@ -410,6 +412,10 @@ describe("server config routes and websocket", () => {
       }),
     );
     expect(versionedSelectResponse.status).toBe(201);
+
+    const pickerInfoResponse = (routes["/api/projects/picker"] as { GET: () => Response }).GET();
+    expect(pickerInfoResponse.status).toBe(200);
+    await expect(pickerInfoResponse.json()).resolves.toEqual({ defaultPath: "/tmp/berm-start" });
 
     const pickResponse = (routes["/api/projects/pick"] as { POST: () => Response }).POST();
     expect(pickResponse.status).toBe(200);
@@ -750,5 +756,58 @@ describe("server config routes and websocket", () => {
       await manager.shutdown();
       rmSync(registryPath, { force: true });
     }
+  });
+
+  test("returns project picker directory suggestions", async () => {
+    const manager = new FakeSessionManager();
+    const root = mkdtempSync(join(tmpdir(), "berm-picker-"));
+    const alphaDir = join(root, "alpha-project");
+    const bermDir = join(root, "berm");
+    const betaFile = join(root, "beta.txt");
+
+    mkdirSync(alphaDir);
+    mkdirSync(bermDir);
+    writeFileSync(betaFile, "not a directory");
+
+    try {
+      const config = createServerConfig(manager, () => Response.json({ path: "/tmp/picked-project" }), root);
+      const routes = config.routes as Record<string, unknown>;
+
+      const response = (routes["/api/projects/picker/suggest"] as { GET: (req: Request) => Response }).GET(
+        new Request(`http://localhost/api/projects/picker/suggest?q=${encodeURIComponent(join(root, "brm"))}`),
+      );
+
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toEqual({
+        query: join(root, "brm"),
+        basePath: root,
+        suggestions: [
+          {
+            path: bermDir,
+            name: "berm",
+            score: expect.any(Number),
+          },
+        ],
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("returns empty project picker suggestions for non-absolute input", async () => {
+    const manager = new FakeSessionManager();
+    const config = createServerConfig(manager, () => Response.json({ path: "/tmp/picked-project" }), "/tmp/berm-start");
+    const routes = config.routes as Record<string, unknown>;
+
+    const response = (routes["/api/projects/picker/suggest"] as { GET: (req: Request) => Response }).GET(
+      new Request("http://localhost/api/projects/picker/suggest?q=berm"),
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      query: "berm",
+      basePath: null,
+      suggestions: [],
+    });
   });
 });

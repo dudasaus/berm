@@ -7,13 +7,14 @@ Web terminal app powered by Bun PTY + zsh on the backend and TanStack React + xt
 ## Projects
 
 - Sessions are scoped to a selected project directory.
-- Use the `Project` control in the UI to select an existing absolute path.
+- Use the `Project` control in the UI to open an in-app absolute-path picker with fuzzy directory suggestions.
 - Recent projects are persisted and reusable.
 - Deleting a project from the UI deletes all sessions in that project.
 - Projects can optionally enable git worktree mode.
 - In worktree mode, you can create sessions either in the main project root or in a new worktree branch.
 - You can manually import existing linked git worktrees via a selection dialog.
 - Worktree-enabled projects can define an optional post-create hook command + timeout.
+- Worktree parent directory selection uses the same in-app path picker instead of a native folder dialog.
 - If a hook fails, the UI shows hook stdout/stderr and lets you abort cleanup or continue session creation.
 - Hook toasts include a "View output" action when stdout/stderr is present.
 - Worktree sessions are persisted and cleaned up (worktree + branch) when deleted.

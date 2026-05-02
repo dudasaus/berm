@@ -1,5 +1,5 @@
-import { join, basename } from "path";
-import { readdirSync } from "fs";
+import { join, basename, dirname, isAbsolute } from "path";
+import { readdirSync, realpathSync, statSync } from "fs";
 import app from "../web/index.html";
 import { version, commitHash } from "../build-info";
 
@@ -162,6 +162,7 @@ export interface SessionManagerLike {
 interface CreateServerOptions {
   manager?: SessionManagerLike;
   pickProjectDirectory?: () => Response;
+  defaultProjectPath?: string;
   host?: string;
   port?: number;
 }
@@ -798,6 +799,145 @@ function buildGitHubSyncResponse(manager: SessionManagerLike, projectId: string)
   };
 }
 
+type ProjectPickerSuggestion = {
+  path: string;
+  name: string;
+  score: number;
+};
+
+const MAX_PROJECT_PICKER_SCAN_ENTRIES = 2_000;
+const MAX_PROJECT_PICKER_SUGGESTIONS = 20;
+
+function normalizeDefaultProjectPath(defaultProjectPath: string): string {
+  try {
+    return realpathSync(defaultProjectPath);
+  } catch {
+    return defaultProjectPath;
+  }
+}
+
+function isPathSeparator(value: string): boolean {
+  return value === "/" || value === "\\";
+}
+
+function directorySubsequenceScore(candidate: string, query: string): number | null {
+  let score = 0;
+  let queryIndex = 0;
+  let lastMatchIndex = -1;
+
+  for (let index = 0; index < candidate.length; index += 1) {
+    if (candidate[index] !== query[queryIndex]) {
+      continue;
+    }
+
+    score += lastMatchIndex >= 0 ? index - lastMatchIndex : index;
+    lastMatchIndex = index;
+    queryIndex += 1;
+
+    if (queryIndex === query.length) {
+      return score;
+    }
+  }
+
+  return null;
+}
+
+function scoreProjectDirectorySuggestion(candidatePath: string, candidateName: string, rawQuery: string): number | null {
+  const query = rawQuery.trim().toLowerCase();
+  if (!query) {
+    return 900;
+  }
+
+  const normalizedCandidateName = candidateName.toLowerCase();
+
+  if (candidatePath.toLowerCase() === query) {
+    return 0;
+  }
+
+  if (normalizedCandidateName === query) {
+    return 10;
+  }
+
+  if (normalizedCandidateName.startsWith(query)) {
+    return 20 + normalizedCandidateName.length - query.length;
+  }
+
+  const basenameIndex = normalizedCandidateName.indexOf(query);
+  if (basenameIndex >= 0) {
+    return 40 + basenameIndex;
+  }
+
+  const basenameFuzzy = directorySubsequenceScore(normalizedCandidateName, query);
+  if (basenameFuzzy !== null) {
+    return 120 + basenameFuzzy;
+  }
+
+  return null;
+}
+
+function buildProjectPickerSuggestions(inputQuery: string): {
+  query: string;
+  basePath: string | null;
+  suggestions: ProjectPickerSuggestion[];
+} {
+  const query = inputQuery.trim();
+  if (!query || !isAbsolute(query)) {
+    return { query, basePath: null, suggestions: [] };
+  }
+
+  const treatAsDirectoryBrowse = isPathSeparator(query.at(-1) ?? "");
+  const searchRoot = treatAsDirectoryBrowse ? query : dirname(query);
+  const searchTerm = treatAsDirectoryBrowse ? "" : basename(query);
+
+  let normalizedBasePath: string;
+  try {
+    normalizedBasePath = realpathSync(searchRoot);
+  } catch {
+    return { query, basePath: searchRoot, suggestions: [] };
+  }
+
+  let entries: Array<{ name: string }>;
+  try {
+    entries = readdirSync(normalizedBasePath, { withFileTypes: true }).slice(0, MAX_PROJECT_PICKER_SCAN_ENTRIES);
+  } catch {
+    return { query, basePath: normalizedBasePath, suggestions: [] };
+  }
+
+  const suggestions: ProjectPickerSuggestion[] = [];
+  for (const entry of entries) {
+    const entryPath = join(normalizedBasePath, entry.name);
+
+    let normalizedEntryPath = entryPath;
+    try {
+      normalizedEntryPath = realpathSync(entryPath);
+      if (!statSync(normalizedEntryPath).isDirectory()) {
+        continue;
+      }
+    } catch {
+      continue;
+    }
+
+    const score = scoreProjectDirectorySuggestion(normalizedEntryPath, basename(normalizedEntryPath), searchTerm || query);
+    if (searchTerm && score === null) {
+      continue;
+    }
+
+    suggestions.push({
+      path: normalizedEntryPath,
+      name: basename(normalizedEntryPath),
+      score: score ?? 900,
+    });
+  }
+
+  suggestions.sort((a, b) => a.score - b.score || a.name.localeCompare(b.name) || a.path.localeCompare(b.path));
+
+  return {
+    query,
+    basePath: normalizedBasePath,
+    suggestions: suggestions.slice(0, MAX_PROJECT_PICKER_SUGGESTIONS),
+  };
+}
+
 function prefixRoutes(prefix: string, routes: Record<string, unknown>): Record<string, unknown> {
   const prefixed: Record<string, unknown> = {};
   for (const [path, handler] of Object.entries(routes)) {
@@ -809,7 +949,9 @@ function prefixRoutes(prefix: string, routes: Record<string, unknown>): Record<s
 export function createServerConfig(
   manager: SessionManagerLike,
   openProjectPicker: () => Response = pickProjectDirectory,
+  defaultProjectPath = process.cwd(),
 ): ServerConfig {
+  const normalizedDefaultProjectPath = normalizeDefaultProjectPath(defaultProjectPath);
   const apiRoutes: Record<string, unknown> = {
     "/health": () => buildHealthResponse(),
     "/version": () => buildVersionResponse(),
@@ -828,6 +970,18 @@ export function createServerConfig(
         } catch (error) {
           return errorResponse(error);
         }
+      },
+    },
+    "/projects/picker": {
+      GET: () => {
+        return Response.json({ defaultPath: normalizedDefaultProjectPath });
+      },
+    },
+    "/projects/picker/suggest": {
+      GET: (req: Request) => {
+        const url = new URL(req.url);
+        const query = url.searchParams.get("q") ?? "";
+        return Response.json(buildProjectPickerSuggestions(query));
       },
     },
     "/projects/:id": {
@@ -1065,7 +1219,7 @@ export function createServer(options: number | CreateServerOptions = {}) {
   const port = normalized.port ?? Number(envWithLegacy("BERM_PORT", "COMMAND_CENTER_PORT") ?? 3000);
   const manager = normalized.manager ?? createDefaultManager();
   const openProjectPicker = normalized.pickProjectDirectory ?? pickProjectDirectory;
-  const config = createServerConfig(manager, openProjectPicker);
+  const config = createServerConfig(manager, openProjectPicker, normalized.defaultProjectPath ?? process.cwd());
 
   const serverOptions = {
     hostname: host,
