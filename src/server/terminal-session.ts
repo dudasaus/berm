@@ -74,6 +74,11 @@ export interface UpdateSessionLifecycleRequest {
   lifecycleState: SessionLifecycleState;
 }
 
+export interface SendSessionInputRequest {
+  data: string;
+  force?: boolean;
+}
+
 export interface WorktreeHookExecutionDetails {
   command: string;
   stdout: string;
@@ -201,6 +206,7 @@ const DEFAULT_WORKTREE_HOOK_TIMEOUT_MS = 15_000;
 const MIN_WORKTREE_HOOK_TIMEOUT_MS = 1_000;
 const MAX_WORKTREE_HOOK_TIMEOUT_MS = 120_000;
 const WORKTREE_HOOK_DECISION_TTL_MS = 60 * 60 * 1_000;
+const SHELL_COMMANDS = new Set(["bash", "fish", "ksh", "sh", "tcsh", "zsh"]);
 const textDecoder = new TextDecoder();
 
 class SessionManagerError extends Error {
@@ -1041,6 +1047,58 @@ export class TerminalSessionManager {
     }
 
     this.saveRegistry();
+    return this.toMetadata(session);
+  }
+
+  sendSessionInput(projectId: string, sessionId: string, input: SendSessionInputRequest): SessionMetadata {
+    this.syncSessionsFromTmux();
+    this.assertAvailable();
+    this.requireProject(projectId);
+
+    if (!input || typeof input.data !== "string" || input.data.length === 0) {
+      throw new SessionManagerError("data must be a non-empty string", 400, "SESSION_INPUT_INVALID");
+    }
+
+    const key = this.sessionKey(projectId, sessionId);
+    const session = this.sessions.get(key);
+    if (!session) {
+      throw new SessionManagerError("Session not found", 404, "SESSION_NOT_FOUND");
+    }
+
+    if (!input.force) {
+      const currentCommand = this.getTmuxPaneCurrentCommand(session.tmuxSessionName);
+      if (!SHELL_COMMANDS.has(currentCommand)) {
+        throw new SessionManagerError(
+          `Session is busy with '${currentCommand}'`,
+          409,
+          "SESSION_BUSY",
+          { currentCommand },
+        );
+      }
+    }
+
+    const sendResult = this.sendTmuxInput(session.tmuxSessionName, input.data);
+    if (sendResult.exitCode !== 0) {
+      throw new SessionManagerError(
+        `Failed to send input to session '${sessionId}': ${sendResult.stderr || "unknown error"}`,
+        isMissingSessionError(sendResult.stderr) ? 404 : 500,
+        isMissingSessionError(sendResult.stderr) ? "SESSION_NOT_FOUND" : "SESSION_INPUT_FAILED",
+      );
+    }
+
+    const nowMs = Date.now();
+    const nowIso = new Date(nowMs).toISOString();
+    session.lastActiveAtMs = nowMs;
+
+    const existingRegistryEntry = this.registrySessions.get(key);
+    if (existingRegistryEntry) {
+      this.registrySessions.set(key, {
+        ...existingRegistryEntry,
+        lastActiveAt: nowIso,
+      });
+      this.saveRegistry();
+    }
+
     return this.toMetadata(session);
   }
 
@@ -1900,6 +1958,54 @@ export class TerminalSessionManager {
       stdout: textDecoder.decode(result.stdout).trim(),
       stderr: textDecoder.decode(result.stderr).trim(),
     };
+  }
+
+  private sendTmuxInput(tmuxSessionName: string, data: string): { exitCode: number; stdout: string; stderr: string } {
+    let index = 0;
+    while (index < data.length) {
+      const nextNewlineIndex = data.slice(index).search(/\r\n|\n|\r/);
+      if (nextNewlineIndex === -1) {
+        const chunk = data.slice(index);
+        if (chunk.length > 0) {
+          return this.runTmux(["send-keys", "-t", tmuxSessionName, "-l", chunk]);
+        }
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+
+      const absoluteNewlineIndex = index + nextNewlineIndex;
+      const chunk = data.slice(index, absoluteNewlineIndex);
+      if (chunk.length > 0) {
+        const literalResult = this.runTmux(["send-keys", "-t", tmuxSessionName, "-l", chunk]);
+        if (literalResult.exitCode !== 0) {
+          return literalResult;
+        }
+      }
+
+      const enterResult = this.runTmux(["send-keys", "-t", tmuxSessionName, "Enter"]);
+      if (enterResult.exitCode !== 0) {
+        return enterResult;
+      }
+
+      const matched = data.startsWith("\r\n", absoluteNewlineIndex)
+        ? "\r\n"
+        : data.slice(absoluteNewlineIndex, absoluteNewlineIndex + 1);
+      index = absoluteNewlineIndex + matched.length;
+    }
+
+    return { exitCode: 0, stdout: "", stderr: "" };
+  }
+
+  private getTmuxPaneCurrentCommand(tmuxSessionName: string): string {
+    const result = this.runTmux(["display-message", "-p", "-t", tmuxSessionName, "#{pane_current_command}"]);
+    if (result.exitCode !== 0) {
+      throw new SessionManagerError(
+        `Failed to inspect session '${tmuxSessionName}': ${result.stderr || "unknown error"}`,
+        isMissingSessionError(result.stderr) ? 404 : 500,
+        isMissingSessionError(result.stderr) ? "SESSION_NOT_FOUND" : "SESSION_INSPECT_FAILED",
+      );
+    }
+
+    return result.stdout.trim() || "unknown";
   }
 
   private runTmux(args: string[]): { exitCode: number; stdout: string; stderr: string } {

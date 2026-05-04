@@ -56,6 +56,7 @@ Responsibilities:
 
 - Project CRUD surface used by API layer (`listProjects`, `selectProject`, `updateProject`, `deleteProject`)
 - Project-scoped session lifecycle (`createSession`, `importWorktreeSessions`, `listSessions`, `listAllSessions`, `updateSessionLifecycleState`, `deleteSession`)
+- Direct session input for automation (`sendSessionInput`) without requiring an attached browser client
 - WebSocket client attach/detach and message handling
 - tmux reconciliation and availability/error management
 - git worktree creation/removal for worktree-mode sessions
@@ -180,6 +181,11 @@ Agent and CLI integrations should prefer `/api/v1/...`.
   - Resolve failed hook with `{ decisionToken, decision }`
   - `decision` is `"abort"` (cleanup worktree+branch) or `"continue"` (create tmux session anyway)
 - `GET /api/projects/:projectId/sessions/:id`
+- `POST /api/projects/:projectId/sessions/:id/input` with `{ data }`
+  - Sends terminal input directly to the tmux session
+  - Does not require an attached browser terminal
+  - By default, sends only when tmux reports the foreground command is a shell (`zsh`, `bash`, `fish`, etc.)
+  - Pass `{ force: true }` to intentionally send input to a busy foreground process
 - `PATCH /api/projects/:projectId/sessions/:id` with `{ lifecycleState }`
 - `DELETE /api/projects/:projectId/sessions/:id`
 - Same routes are also available under `/api/v1/...`

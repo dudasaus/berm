@@ -44,6 +44,7 @@ class FakeSessionManager implements SessionManagerLike {
   projects = new Map<string, ProjectMetadata>();
   sessions = new Map<string, SessionMetadata>();
   handledMessages: Array<{ projectId: string; sessionId: string; clientId: string; rawMessage: unknown }> = [];
+  sentInputs: Array<{ projectId: string; sessionId: string; data: string; force: boolean }> = [];
   detachEvents: Array<{ projectId: string; sessionId: string; clientId: string }> = [];
   attachShouldFail = false;
   pendingHookFailures = new Map<string, { projectId: string; branchName: string; workspacePath: string }>();
@@ -274,6 +275,26 @@ class FakeSessionManager implements SessionManagerLike {
       ...session,
       lifecycleState: input.lifecycleState,
       lifecycleUpdatedAt: nowIso(),
+    };
+    this.sessions.set(key, updated);
+    return updated;
+  }
+
+  sendSessionInput(projectId: string, sessionId: string, input: { data: string; force?: boolean }): SessionMetadata {
+    const key = sessionKey(projectId, sessionId);
+    const session = this.sessions.get(key);
+    if (!session) {
+      throw new Error("session missing");
+    }
+
+    if (!input.data) {
+      throw new Error("data must be a non-empty string");
+    }
+
+    this.sentInputs.push({ projectId, sessionId, data: input.data, force: input.force === true });
+    const updated: SessionMetadata = {
+      ...session,
+      lastActiveAt: nowIso(),
     };
     this.sessions.set(key, updated);
     return updated;
@@ -551,6 +572,51 @@ describe("server config routes and websocket", () => {
     expect(patchSessionResponse.status).toBe(200);
     const patchSessionPayload = (await patchSessionResponse.json()) as SessionMetadata;
     expect(patchSessionPayload.lifecycleState).toBe("in_review");
+
+    const sendInputResponse = await (routes["/api/projects/:projectId/sessions/:id/input"] as {
+      POST: (req: Bun.BunRequest<"/api/projects/:projectId/sessions/:id/input">) => Promise<Response>;
+    }).POST(
+      makeRequest<"/api/projects/:projectId/sessions/:id/input">(
+        { projectId: "p1", id: "main-1" },
+        { data: "codex\n" },
+      ),
+    );
+    expect(sendInputResponse.status).toBe(200);
+    const sendInputPayload = (await sendInputResponse.json()) as { ok?: boolean; session?: SessionMetadata };
+    expect(sendInputPayload.ok).toBe(true);
+    expect(sendInputPayload.session?.id).toBe("main-1");
+    expect(manager.sentInputs).toContainEqual({
+      projectId: "p1",
+      sessionId: "main-1",
+      data: "codex\n",
+      force: false,
+    });
+
+    const forceSendInputResponse = await (routes["/api/projects/:projectId/sessions/:id/input"] as {
+      POST: (req: Bun.BunRequest<"/api/projects/:projectId/sessions/:id/input">) => Promise<Response>;
+    }).POST(
+      makeRequest<"/api/projects/:projectId/sessions/:id/input">(
+        { projectId: "p1", id: "main-1" },
+        { data: "claude\n", force: true },
+      ),
+    );
+    expect(forceSendInputResponse.status).toBe(200);
+    expect(manager.sentInputs).toContainEqual({
+      projectId: "p1",
+      sessionId: "main-1",
+      data: "claude\n",
+      force: true,
+    });
+
+    const invalidSendInputResponse = await (routes["/api/projects/:projectId/sessions/:id/input"] as {
+      POST: (req: Bun.BunRequest<"/api/projects/:projectId/sessions/:id/input">) => Promise<Response>;
+    }).POST(
+      makeRequest<"/api/projects/:projectId/sessions/:id/input">(
+        { projectId: "p1", id: "main-1" },
+        { data: "" },
+      ),
+    );
+    expect(invalidSendInputResponse.status).toBe(400);
 
     const deleteSessionResponse = (routes["/api/projects/:projectId/sessions/:id"] as {
       DELETE: (req: Bun.BunRequest<"/api/projects/:projectId/sessions/:id">) => Response;

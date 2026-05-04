@@ -101,6 +101,21 @@ function cleanupTmuxServer(socketName: string) {
   });
 }
 
+function currentTmuxCommand(context: TestContext, projectId: string, sessionId: string): string {
+  const result = Bun.spawnSync(
+    ["tmux", "-L", context.socketName, "display-message", "-p", "-t", `${projectId}__${sessionId}`, "#{pane_current_command}"],
+    {
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  );
+  if (result.exitCode !== 0) {
+    return "";
+  }
+
+  return new TextDecoder().decode(result.stdout).trim();
+}
+
 afterEach(async () => {
   for (const context of contexts) {
     await context.manager.shutdown();
@@ -186,6 +201,97 @@ describe("TerminalSessionManager (tmux, projects)", () => {
     expect(deleted).toBe(true);
 
     expect(context.manager.hasSession(project.id, sessionId)).toBe(false);
+  });
+
+  test("sends input to a session without an attached client", async () => {
+    const context = createContext("send-input");
+    if (!context.manager.isTmuxAvailable()) {
+      return;
+    }
+
+    const projectPath = createProjectPath("send-input");
+    context.projectPaths.push(projectPath);
+    const project = context.manager.selectProject(projectPath);
+
+    const sessionId = uniqueSessionName("cc-send");
+    try {
+      context.manager.createSession(project.id, sessionId);
+    } catch (error) {
+      if (shouldSkipTmux(error)) {
+        return;
+      }
+      throw error;
+    }
+
+    const token = `__BERM_SEND_${Date.now()}__`;
+    const sent = context.manager.sendSessionInput(project.id, sessionId, {
+      data: `printf '${token}\\n'\n`,
+    });
+    expect(sent.id).toBe(sessionId);
+    expect(sent.attachedClients).toBe(0);
+
+    const received: ServerMessage[] = [];
+    context.manager.attachClient(project.id, sessionId, {
+      id: "client-send",
+      send(message) {
+        received.push(message);
+      },
+    });
+
+    await waitFor(() => received.some((message) => message.type === "output" && message.data.includes(token)));
+
+    context.manager.detachClient(project.id, sessionId, "client-send");
+    context.manager.deleteSession(project.id, sessionId);
+  });
+
+  test("refuses to send input when a non-shell command is foregrounded unless forced", async () => {
+    const context = createContext("send-busy");
+    if (!context.manager.isTmuxAvailable()) {
+      return;
+    }
+
+    const projectPath = createProjectPath("send-busy");
+    context.projectPaths.push(projectPath);
+    const project = context.manager.selectProject(projectPath);
+
+    const sessionId = uniqueSessionName("cc-busy");
+    try {
+      context.manager.createSession(project.id, sessionId);
+      context.manager.sendSessionInput(project.id, sessionId, {
+        data: "sleep 5\n",
+      });
+    } catch (error) {
+      if (shouldSkipTmux(error)) {
+        return;
+      }
+      throw error;
+    }
+
+    await waitFor(() => currentTmuxCommand(context, project.id, sessionId) === "sleep");
+
+    let thrown: unknown = null;
+    try {
+      context.manager.sendSessionInput(project.id, sessionId, {
+        data: "echo should-not-send\n",
+      });
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(isSessionManagerError(thrown)).toBe(true);
+    if (!isSessionManagerError(thrown)) {
+      return;
+    }
+    expect(thrown.code).toBe("SESSION_BUSY");
+    expect(thrown.details?.currentCommand).toBe("sleep");
+
+    const forced = context.manager.sendSessionInput(project.id, sessionId, {
+      data: "echo queued-after-sleep\n",
+      force: true,
+    });
+    expect(forced.id).toBe(sessionId);
+
+    context.manager.deleteSession(project.id, sessionId);
   });
 
   test("deletes a project and all sessions in that project", () => {

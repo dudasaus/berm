@@ -58,6 +58,15 @@ type SessionsGetCommand = SharedCliOptions & {
   sessionId?: string;
 };
 
+type SessionsSendCommand = SharedCliOptions & {
+  kind: "sessions-send";
+  commandText?: string;
+  force: boolean;
+  projectId?: string;
+  sessionId?: string;
+  text?: string;
+};
+
 type SessionsDeleteCommand = SharedCliOptions & {
   kind: "sessions-delete";
   projectId?: string;
@@ -79,6 +88,7 @@ export type CliCommand =
   | SessionsListCommand
   | SessionsCreateCommand
   | SessionsGetCommand
+  | SessionsSendCommand
   | SessionsDeleteCommand
   | SessionsLifecycleSetCommand;
 
@@ -126,6 +136,11 @@ interface CreateSessionResult {
   hook: SessionHookResult | null;
 }
 
+interface SendSessionInputResult {
+  ok: boolean;
+  session: SessionMetadata;
+}
+
 function usage(): string {
   return [
     "Usage:",
@@ -139,6 +154,7 @@ function usage(): string {
     "  berm sessions create --project <id> [--name <name>] [--json]",
     "  berm sessions create --project <id> --worktree --branch <branch> [--json]",
     "  berm sessions get --project <id> --session <id> [--json]",
+    "  berm sessions send --project <id> --session <id> (--command <command> | --text <text>) [--force] [--json]",
     "  berm sessions delete --project <id> --session <id> [--json]",
     "  berm sessions lifecycle set --project <id> --session <id> --state <state> [--json]",
     "",
@@ -387,6 +403,59 @@ function parseSessionsCommand(argv: string[], index: number, baseOptions: Shared
     return { kind: "sessions-delete", projectId, sessionId, ...options };
   }
 
+  if (subcommand === "send") {
+    const options = cloneOptions(baseOptions);
+    let commandText: string | undefined;
+    let force = false;
+    let projectId: string | undefined;
+    let sessionId: string | undefined;
+    let text: string | undefined;
+    index += 1;
+
+    while (index < argv.length) {
+      const nextIndex = consumeSharedOption(argv, index, options);
+      if (nextIndex !== null) {
+        index = nextIndex;
+        continue;
+      }
+
+      const arg = argv[index];
+      if (arg === "--project") {
+        projectId = requireOptionValue(arg, argv[index + 1]);
+        index += 2;
+        continue;
+      }
+
+      if (arg === "--session") {
+        sessionId = requireOptionValue(arg, argv[index + 1]);
+        index += 2;
+        continue;
+      }
+
+      if (arg === "--command") {
+        commandText = requireOptionValue(arg, argv[index + 1]);
+        index += 2;
+        continue;
+      }
+
+      if (arg === "--text") {
+        text = requireOptionValue(arg, argv[index + 1]);
+        index += 2;
+        continue;
+      }
+
+      if (arg === "--force") {
+        force = true;
+        index += 1;
+        continue;
+      }
+
+      throw new Error(`Unknown argument: ${arg}`);
+    }
+
+    return { kind: "sessions-send", commandText, force, projectId, sessionId, text, ...options };
+  }
+
   if (subcommand === "lifecycle") {
     if (argv[index + 1] === "help") {
       return { kind: "serve", ...cloneOptions(baseOptions), help: true };
@@ -604,6 +673,22 @@ function requireLifecycleState(state: SessionLifecycleState | undefined, help: b
   throw new Error("Missing required option: --state");
 }
 
+function requireSessionInput(command: SessionsSendCommand): string {
+  const hasCommand = typeof command.commandText !== "undefined";
+  const hasText = typeof command.text !== "undefined";
+
+  if (hasCommand === hasText) {
+    throw new Error("Provide exactly one of --command or --text");
+  }
+
+  const data = hasCommand ? `${command.commandText}\n` : command.text ?? "";
+  if (data.length === 0) {
+    throw new Error("Session input cannot be empty");
+  }
+
+  return data;
+}
+
 function requireProjectPath(path: string | undefined, help: boolean): string {
   if (path || help) {
     return path ?? "";
@@ -732,6 +817,30 @@ async function handleClientCommand(command: CliCommand): Promise<number> {
         printJson(session);
       } else {
         printSessionDetails(session);
+      }
+      return 0;
+    }
+
+    case "sessions-send": {
+      const projectId = requireProjectId(command.projectId, command.help);
+      const sessionId = requireSessionId(command.sessionId, command.help);
+      const data = requireSessionInput(command);
+      const payload = await fetchJson<SendSessionInputResult>(
+        command,
+        `/projects/${encodeURIComponent(projectId)}/sessions/${encodeURIComponent(sessionId)}/input`,
+        {
+          method: "POST",
+          body: JSON.stringify({ data, force: command.force }),
+        },
+      );
+      if (command.json) {
+        printJson({
+          ok: payload.ok,
+          projectId: payload.session.projectId,
+          sessionId: payload.session.id,
+        });
+      } else {
+        console.log(`Sent input to session ${payload.session.id} in project ${payload.session.projectId}`);
       }
       return 0;
     }

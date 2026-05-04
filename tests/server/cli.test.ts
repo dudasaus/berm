@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { parseCliArgs } from "../../src/cli";
+import { parseCliArgs, runCli } from "../../src/cli";
 
 describe("parseCliArgs", () => {
   test("defaults to starting the server", () => {
@@ -107,6 +107,48 @@ describe("parseCliArgs", () => {
     });
   });
 
+  test("parses session input sends", () => {
+    expect(
+      parseCliArgs([
+        "sessions",
+        "send",
+        "--project",
+        "p1",
+        "--session",
+        "s1",
+        "--command",
+        "codex",
+        "--json",
+      ]),
+    ).toEqual({
+      kind: "sessions-send",
+      commandText: "codex",
+      force: false,
+      help: false,
+      host: "127.0.0.1",
+      json: true,
+      port: undefined,
+      projectId: "p1",
+      sessionId: "s1",
+      text: undefined,
+    });
+
+    expect(
+      parseCliArgs(["sessions", "send", "--project", "p1", "--session", "s1", "--text", "echo hi", "--force"]),
+    ).toEqual({
+      kind: "sessions-send",
+      commandText: undefined,
+      force: true,
+      help: false,
+      host: "127.0.0.1",
+      json: false,
+      port: undefined,
+      projectId: "p1",
+      sessionId: "s1",
+      text: "echo hi",
+    });
+  });
+
   test("rejects invalid input", () => {
     expect(() => parseCliArgs(["--port"])).toThrow("Missing value for --port");
     expect(() => parseCliArgs(["--port", "0"])).toThrow("Invalid port for --port: 0");
@@ -114,5 +156,39 @@ describe("parseCliArgs", () => {
     expect(() => parseCliArgs(["sessions", "lifecycle", "set", "--state", "nope"])).toThrow(
       "Invalid lifecycle state: nope",
     );
+    expect(() => parseCliArgs(["sessions", "send", "--project", "p1", "--session", "s1", "--flag"])).toThrow(
+      "Unknown argument: --flag",
+    );
+  });
+
+  test("validates session send input before making a request", async () => {
+    const originalError = console.error;
+    const errors: string[] = [];
+    console.error = (...args: unknown[]) => {
+      errors.push(args.map(String).join(" "));
+    };
+
+    try {
+      expect(
+        await runCli([
+          "sessions",
+          "send",
+          "--project",
+          "p1",
+          "--session",
+          "s1",
+          "--command",
+          "codex",
+          "--text",
+          "claude",
+        ]),
+      ).toBe(1);
+      expect(errors.at(-1)).toBe("Provide exactly one of --command or --text");
+
+      expect(await runCli(["sessions", "send", "--project", "p1", "--session", "s1"])).toBe(1);
+      expect(errors.at(-1)).toBe("Provide exactly one of --command or --text");
+    } finally {
+      console.error = originalError;
+    }
   });
 });

@@ -53,6 +53,7 @@ import {
   type ProjectMetadata,
   type ResolveWorktreeHookDecisionRequest,
   type ResolveWorktreeHookDecisionResult,
+  type SendSessionInputRequest,
   type SessionMetadata,
   TerminalSessionManager,
   type UpdateProjectRequest,
@@ -150,6 +151,7 @@ export interface SessionManagerLike {
   createSession(projectId: string, request?: CreateSessionRequest): CreateSessionResult;
   resolveWorktreeHookDecision(projectId: string, request: ResolveWorktreeHookDecisionRequest): ResolveWorktreeHookDecisionResult;
   updateSessionLifecycleState(projectId: string, sessionId: string, input: UpdateSessionLifecycleRequest): SessionMetadata;
+  sendSessionInput(projectId: string, sessionId: string, input: SendSessionInputRequest): SessionMetadata;
   deleteSession(projectId: string, sessionId: string): boolean;
   hasSession(projectId: string, sessionId: string): boolean;
   attachClient(projectId: string, sessionId: string, client: SessionClient): SessionMetadata | null;
@@ -1109,6 +1111,30 @@ export function createServerConfig(
           }
 
           return Response.json(result);
+        } catch (error) {
+          return errorResponse(error);
+        }
+      },
+    },
+    "/projects/:projectId/sessions/:id/input": {
+      POST: async (req: Bun.BunRequest<"/projects/:projectId/sessions/:id/input">) => {
+        try {
+          const body = (await req.json().catch(() => ({}))) as {
+            data?: unknown;
+            force?: unknown;
+          };
+          if (typeof body.data !== "string" || body.data.length === 0) {
+            return Response.json(
+              { error: "data must be a non-empty string", code: "SESSION_INPUT_INVALID" },
+              { status: 400 },
+            );
+          }
+
+          const session = manager.sendSessionInput(req.params.projectId, req.params.id, {
+            data: body.data,
+            force: body.force === true,
+          });
+          return Response.json({ ok: true, session });
         } catch (error) {
           return errorResponse(error);
         }
