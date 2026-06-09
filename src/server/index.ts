@@ -1,5 +1,6 @@
 import { join, basename, dirname, isAbsolute } from "path";
 import { readdirSync, realpathSync, statSync } from "fs";
+import { RpcSession, type RpcTransport } from "capnweb";
 import app from "../web/index.html";
 import { version, commitHash } from "../build-info";
 
@@ -44,6 +45,7 @@ function resolveAppRoutes(): Record<string, any> {
   return routes;
 }
 import { serializeMessage, type ServerMessage } from "../shared/protocol";
+import { parseNotificationRequest } from "../shared/notifications";
 import {
   type CreateSessionResult,
   type CreateSessionRequest,
@@ -61,12 +63,81 @@ import {
   isSessionManagerError,
   type SessionClient,
 } from "./terminal-session";
+import { NotificationService } from "./notifications";
 
-type WebSocketData = {
+type TerminalWebSocketData = {
+  kind: "terminal";
   projectId: string;
   sessionId: string;
   clientId: string;
 };
+
+type NotificationWebSocketData = {
+  kind: "notifications";
+  rpcSession?: RpcSession;
+  rpcTransport?: BunServerWebSocketRpcTransport;
+};
+
+type WebSocketData = TerminalWebSocketData | NotificationWebSocketData;
+
+class BunServerWebSocketRpcTransport implements RpcTransport {
+  #closedError: Error | null = null;
+  #queuedMessages: string[] = [];
+  #receivers: Array<{ resolve: (message: string) => void; reject: (error: Error) => void }> = [];
+
+  constructor(private readonly ws: Bun.ServerWebSocket<WebSocketData>) {}
+
+  async send(message: string): Promise<void> {
+    this.ws.send(message);
+  }
+
+  receive(): Promise<string> {
+    const queued = this.#queuedMessages.shift();
+    if (typeof queued === "string") {
+      return Promise.resolve(queued);
+    }
+
+    if (this.#closedError) {
+      return Promise.reject(this.#closedError);
+    }
+
+    return new Promise((resolve, reject) => {
+      this.#receivers.push({ resolve, reject });
+    });
+  }
+
+  dispatchMessage(message: string | Buffer<ArrayBuffer>) {
+    const data = typeof message === "string" ? message : textDecoder.decode(message);
+    const receiver = this.#receivers.shift();
+    if (receiver) {
+      receiver.resolve(data);
+      return;
+    }
+
+    this.#queuedMessages.push(data);
+  }
+
+  dispatchClose(code: number, reason: string) {
+    this.#closedError = new Error(`WebSocket closed: ${code}${reason ? ` ${reason}` : ""}`);
+    const receivers = this.#receivers.splice(0);
+    for (const receiver of receivers) {
+      receiver.reject(this.#closedError);
+    }
+  }
+
+  dispatchError(error: Error) {
+    this.#closedError = error;
+    const receivers = this.#receivers.splice(0);
+    for (const receiver of receivers) {
+      receiver.reject(error);
+    }
+  }
+
+  abort(reason: unknown) {
+    const message = reason instanceof Error ? reason.message : String(reason);
+    this.ws.close(1011, message.slice(0, 120));
+  }
+}
 
 type GitHubPullRequestState = "OPEN" | "CLOSED" | "MERGED";
 
@@ -163,6 +234,7 @@ export interface SessionManagerLike {
 
 interface CreateServerOptions {
   manager?: SessionManagerLike;
+  notifications?: NotificationService;
   pickProjectDirectory?: () => Response;
   defaultProjectPath?: string;
   host?: string;
@@ -175,7 +247,7 @@ export interface ServerConfig {
     data: WebSocketData;
     open: (ws: Bun.ServerWebSocket<WebSocketData>) => void;
     message: (ws: Bun.ServerWebSocket<WebSocketData>, message: string | Buffer<ArrayBuffer>) => void;
-    close: (ws: Bun.ServerWebSocket<WebSocketData>) => void;
+    close: (ws: Bun.ServerWebSocket<WebSocketData>, code?: number, reason?: string) => void;
   };
 }
 
@@ -952,11 +1024,26 @@ export function createServerConfig(
   manager: SessionManagerLike,
   openProjectPicker: () => Response = pickProjectDirectory,
   defaultProjectPath = process.cwd(),
+  notifications = new NotificationService(),
 ): ServerConfig {
   const normalizedDefaultProjectPath = normalizeDefaultProjectPath(defaultProjectPath);
   const apiRoutes: Record<string, unknown> = {
     "/health": () => buildHealthResponse(),
     "/version": () => buildVersionResponse(),
+    "/notifications": {
+      GET: () => {
+        return Response.json({ notifications: notifications.listRecent() });
+      },
+      POST: async (req: Request) => {
+        const body = (await req.json().catch(() => ({}))) as unknown;
+        const parsed = parseNotificationRequest(body, "api");
+        if (!parsed.ok) {
+          return Response.json({ error: parsed.error, code: parsed.code }, { status: 400 });
+        }
+
+        return Response.json(notifications.publish(parsed.value), { status: 201 });
+      },
+    },
     "/projects": {
       GET: () => {
         return Response.json({ projects: manager.listProjects() });
@@ -1189,9 +1276,24 @@ export function createServerConfig(
 
     const upgraded = serverRef.upgrade(req, {
       data: {
+        kind: "terminal",
         projectId,
         sessionId,
         clientId: crypto.randomUUID(),
+      },
+    });
+
+    if (!upgraded) {
+      return Response.json({ error: "WebSocket upgrade failed" }, { status: 400 });
+    }
+
+    return undefined;
+  };
+
+  const notificationRoute = (req: Request, serverRef: Pick<Bun.Server<WebSocketData>, "upgrade">) => {
+    const upgraded = serverRef.upgrade(req, {
+      data: {
+        kind: "notifications",
       },
     });
 
@@ -1209,10 +1311,19 @@ export function createServerConfig(
       ...prefixRoutes("/api/v1", apiRoutes),
       "/ws/terminal": terminalRoute,
       "/api/v1/ws/terminal": terminalRoute,
+      "/ws/notifications": notificationRoute,
+      "/api/v1/ws/notifications": notificationRoute,
     },
     websocket: {
-      data: {} as WebSocketData,
+      data: { kind: "terminal", projectId: "", sessionId: "", clientId: "" } as WebSocketData,
       open(ws: Bun.ServerWebSocket<WebSocketData>) {
+        if (ws.data.kind === "notifications") {
+          const transport = new BunServerWebSocketRpcTransport(ws);
+          ws.data.rpcTransport = transport;
+          ws.data.rpcSession = new RpcSession(transport, notifications.createApi());
+          return;
+        }
+
         const client: SessionClient = {
           id: ws.data.clientId,
           send(message: ServerMessage) {
@@ -1230,9 +1341,19 @@ export function createServerConfig(
         }
       },
       message(ws: Bun.ServerWebSocket<WebSocketData>, message: string | Buffer<ArrayBuffer>) {
+        if (ws.data.kind === "notifications") {
+          ws.data.rpcTransport?.dispatchMessage(message);
+          return;
+        }
+
         manager.handleClientMessage(ws.data.projectId, ws.data.sessionId, ws.data.clientId, message);
       },
-      close(ws: Bun.ServerWebSocket<WebSocketData>) {
+      close(ws: Bun.ServerWebSocket<WebSocketData>, code = 1000, reason = "") {
+        if (ws.data.kind === "notifications") {
+          ws.data.rpcTransport?.dispatchClose(code, reason);
+          return;
+        }
+
         manager.detachClient(ws.data.projectId, ws.data.sessionId, ws.data.clientId);
       },
     },
@@ -1244,8 +1365,9 @@ export function createServer(options: number | CreateServerOptions = {}) {
   const host = normalized.host ?? envWithLegacy("BERM_HOST", "COMMAND_CENTER_HOST") ?? "127.0.0.1";
   const port = normalized.port ?? Number(envWithLegacy("BERM_PORT", "COMMAND_CENTER_PORT") ?? 3000);
   const manager = normalized.manager ?? createDefaultManager();
+  const notifications = normalized.notifications ?? new NotificationService();
   const openProjectPicker = normalized.pickProjectDirectory ?? pickProjectDirectory;
-  const config = createServerConfig(manager, openProjectPicker, normalized.defaultProjectPath ?? process.cwd());
+  const config = createServerConfig(manager, openProjectPicker, normalized.defaultProjectPath ?? process.cwd(), notifications);
 
   const serverOptions = {
     hostname: host,
@@ -1259,8 +1381,8 @@ export function createServer(options: number | CreateServerOptions = {}) {
       message(ws, message) {
         config.websocket.message(ws, message);
       },
-      close(ws) {
-        config.websocket.close(ws);
+      close(ws, code, reason) {
+        config.websocket.close(ws, code, reason);
       },
     },
   } as Bun.Serve.Options<WebSocketData, string>;

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -410,6 +410,48 @@ describe("server config routes and websocket", () => {
     const versionedHealthResponse = (routes["/api/v1/health"] as () => Response)();
     expect(versionedHealthResponse.status).toBe(200);
 
+    const createNotificationResponse = await (routes["/api/notifications"] as {
+      POST: (req: Request) => Promise<Response>;
+    }).POST(
+      new Request("http://localhost/api/notifications", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          title: "Build finished",
+          message: "bun test passed",
+          level: "success",
+          projectId: "p1",
+          sessionId: "s1",
+        }),
+      }),
+    );
+    expect(createNotificationResponse.status).toBe(201);
+    const createNotificationPayload = (await createNotificationResponse.json()) as {
+      ok?: boolean;
+      notification?: { title?: string; level?: string; projectId?: string | null; sessionId?: string | null };
+    };
+    expect(createNotificationPayload.ok).toBe(true);
+    expect(createNotificationPayload.notification?.title).toBe("Build finished");
+    expect(createNotificationPayload.notification?.level).toBe("success");
+    expect(createNotificationPayload.notification?.projectId).toBe("p1");
+    expect(createNotificationPayload.notification?.sessionId).toBe("s1");
+
+    const listNotificationsResponse = (routes["/api/v1/notifications"] as { GET: () => Response }).GET();
+    expect(listNotificationsResponse.status).toBe(200);
+    const listNotificationsPayload = (await listNotificationsResponse.json()) as { notifications?: unknown[] };
+    expect(listNotificationsPayload.notifications).toHaveLength(1);
+
+    const invalidNotificationResponse = await (routes["/api/v1/notifications"] as {
+      POST: (req: Request) => Promise<Response>;
+    }).POST(
+      new Request("http://localhost/api/v1/notifications", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ title: "", level: "critical" }),
+      }),
+    );
+    expect(invalidNotificationResponse.status).toBe(400);
+
     const projectsResponse = (routes["/api/projects"] as { GET: () => Response }).GET();
     expect(projectsResponse.status).toBe(200);
     const versionedProjectsResponse = (routes["/api/v1/projects"] as { GET: () => Response }).GET();
@@ -652,6 +694,10 @@ describe("server config routes and websocket", () => {
       req: Request,
       server: { upgrade: (req: Request, data?: { data: unknown }) => boolean },
     ) => Response | undefined;
+    const notificationWsRoute = routes["/ws/notifications"] as (
+      req: Request,
+      server: { upgrade: (req: Request, data?: { data: unknown }) => boolean },
+    ) => Response | undefined;
 
     const noParamsResponse = wsRoute(new Request("http://localhost/ws/terminal"), {
       upgrade: () => true,
@@ -707,6 +753,16 @@ describe("server config routes and websocket", () => {
     );
     expect(versionedUpgradedResponse).toBeUndefined();
 
+    let notificationUpgradeData: unknown = null;
+    const notificationUpgradedResponse = notificationWsRoute(new Request("http://localhost/ws/notifications"), {
+      upgrade: (_req: Request, data?: { data: unknown }) => {
+        notificationUpgradeData = data?.data ?? null;
+        return true;
+      },
+    });
+    expect(notificationUpgradedResponse).toBeUndefined();
+    expect(notificationUpgradeData).toEqual({ kind: "notifications" });
+
     const upgradeFailedResponse = wsRoute(
       new Request("http://localhost/ws/terminal?projectId=p1&sessionId=live"),
       {
@@ -727,6 +783,7 @@ describe("server config routes and websocket", () => {
 
     const ws = {
       data: {
+        kind: "terminal",
         projectId: "p1",
         sessionId: "live",
         clientId: "client-1",
@@ -766,6 +823,7 @@ describe("server config routes and websocket", () => {
 
     const ws = {
       data: {
+        kind: "terminal",
         projectId: "p1",
         sessionId: "live",
         clientId: "client-2",
@@ -827,8 +885,10 @@ describe("server config routes and websocket", () => {
   test("returns project picker directory suggestions", async () => {
     const manager = new FakeSessionManager();
     const root = mkdtempSync(join(tmpdir(), "berm-picker-"));
+    const realRoot = realpathSync(root);
     const alphaDir = join(root, "alpha-project");
     const bermDir = join(root, "berm");
+    const realBermDir = join(realRoot, "berm");
     const betaFile = join(root, "beta.txt");
 
     mkdirSync(alphaDir);
@@ -846,10 +906,10 @@ describe("server config routes and websocket", () => {
       expect(response.status).toBe(200);
       await expect(response.json()).resolves.toEqual({
         query: join(root, "brm"),
-        basePath: root,
+        basePath: realRoot,
         suggestions: [
           {
-            path: bermDir,
+            path: realBermDir,
             name: "berm",
             score: expect.any(Number),
           },

@@ -368,9 +368,14 @@ describe("TerminalSessionManager (tmux, projects)", () => {
     await waitFor(() => receivedA.some((message) => message.type === "output" && message.data.includes(token)));
     await waitFor(() => receivedB.some((message) => message.type === "output" && message.data.includes(token)));
 
-    expect(
-      receivedA.some((message) => message.type === "output" && message.data.includes(project.path)),
-    ).toBe(true);
+    const expectedProjectPath = realpathSync(project.path);
+    await waitFor(() =>
+      receivedA
+        .filter((message) => message.type === "output")
+        .map((message) => message.data)
+        .join("")
+        .includes(expectedProjectPath),
+    );
 
     context.manager.handleClientMessage(project.id, sessionId, "client-a", { type: "resize", cols: 111, rows: 34 });
     const metadataAfterResize = context.manager.getSessionMetadata(project.id, sessionId);
