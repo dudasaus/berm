@@ -154,6 +154,7 @@ Agent and CLI integrations should prefer `/api/v1/...`.
   - `source` defaults to `"api"`; the CLI sends `"cli"`
   - Response shape: `{ ok: true, notification }`
   - Browsers require a user gesture before native notifications can be enabled; the UI shows an enable control until permission is granted.
+  - Native delivery uses `/notification-worker.js` + `ServiceWorkerRegistration.showNotification()` when available, with `new Notification()` as a fallback.
   - Server logs emit searchable `notification.received`, `notification.broadcast`, `notification.dropped`, and `notification.publish.completed` events.
 
 ### Projects
@@ -213,6 +214,7 @@ Agent and CLI integrations should prefer `/api/v1/...`.
 - `GET /api/v1/ws/terminal?projectId=<id>&sessionId=<id>` (upgrade)
 - `GET /ws/notifications` (Cap'n Web RPC upgrade)
 - `GET /api/v1/ws/notifications` (Cap'n Web RPC upgrade)
+- `GET /notification-worker.js` (browser notification service worker)
 
 ## Terminal Protocol
 

@@ -410,6 +410,12 @@ describe("server config routes and websocket", () => {
     const versionedHealthResponse = (routes["/api/v1/health"] as () => Response)();
     expect(versionedHealthResponse.status).toBe(200);
 
+    const notificationWorkerResponse = (routes["/notification-worker.js"] as () => Response)();
+    expect(notificationWorkerResponse.status).toBe(200);
+    expect(notificationWorkerResponse.headers.get("content-type")).toContain("text/javascript");
+    expect(notificationWorkerResponse.headers.get("service-worker-allowed")).toBe("/");
+    expect(await notificationWorkerResponse.text()).toContain("notificationclick");
+
     const createNotificationResponse = await (routes["/api/notifications"] as {
       POST: (req: Request) => Promise<Response>;
     }).POST(

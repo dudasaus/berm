@@ -15,12 +15,13 @@ type NotificationConnectionState = "connecting" | "connected" | "disconnected";
 type BrowserNotificationDelivery = {
   permission: BrowserNotificationPermission;
   nativeShown: boolean;
+  nativePath: "service-worker" | "window" | null;
   toastShown: boolean;
 };
 type NotificationToastFn = (title: string, options?: { description?: string; action?: { label: string; onClick: () => void } }) => void;
 
 class BrowserNotificationClient extends RpcTarget {
-  constructor(private readonly onNotify: (notification: BermNotification) => BrowserNotificationDelivery) {
+  constructor(private readonly onNotify: (notification: BermNotification) => Promise<BrowserNotificationDelivery>) {
     super();
   }
 
@@ -71,9 +72,29 @@ async function requestPermission(): Promise<BrowserNotificationPermission> {
   }
 }
 
-function showBrowserNotification(notification: BermNotification): boolean {
+async function showBrowserNotification(notification: BermNotification): Promise<{
+  nativeShown: boolean;
+  nativePath: BrowserNotificationDelivery["nativePath"];
+}> {
   if (!("Notification" in window) || Notification.permission !== "granted") {
-    return false;
+    return { nativeShown: false, nativePath: null };
+  }
+
+  if ("serviceWorker" in navigator) {
+    try {
+      const registration = await navigator.serviceWorker.register("/notification-worker.js", { scope: "/" });
+      await navigator.serviceWorker.ready;
+      await registration.showNotification(notification.title, {
+        body: notification.message ?? undefined,
+        tag: notification.id,
+        data: {
+          url: window.location.href,
+        },
+      });
+      return { nativeShown: true, nativePath: "service-worker" };
+    } catch {
+      // Fall through to window Notification for browsers without service-worker notification support.
+    }
   }
 
   try {
@@ -85,9 +106,9 @@ function showBrowserNotification(notification: BermNotification): boolean {
       window.focus();
       browserNotification.close();
     };
-    return true;
+    return { nativeShown: true, nativePath: "window" };
   } catch {
-    return false;
+    return { nativeShown: false, nativePath: null };
   }
 }
 
@@ -122,21 +143,23 @@ export function NotificationListener() {
     let pollTimer: number | null = null;
     let api: RpcStub<NotificationApi> | null = null;
 
-    const handleNotification = (notification: BermNotification): BrowserNotificationDelivery => {
+    const handleNotification = async (notification: BermNotification): Promise<BrowserNotificationDelivery> => {
       if (seenIdsRef.current.has(notification.id)) {
         return {
           permission: readPermission(),
+          nativePath: null,
           nativeShown: false,
           toastShown: false,
         };
       }
 
       seenIdsRef.current.add(notification.id);
-      const nativeShown = showBrowserNotification(notification);
+      const nativeDelivery = await showBrowserNotification(notification);
       showToast(notification);
       return {
         permission: readPermission(),
-        nativeShown,
+        nativePath: nativeDelivery.nativePath,
+        nativeShown: nativeDelivery.nativeShown,
         toastShown: true,
       };
     };
@@ -150,7 +173,7 @@ export function NotificationListener() {
 
         const payload = (await response.json()) as { notifications?: BermNotification[] };
         for (const notification of payload.notifications ?? []) {
-          handleNotification(notification);
+          void handleNotification(notification);
         }
       } catch {
         // The WebSocket path reports connection state; polling is only a delivery fallback.
@@ -176,7 +199,7 @@ export function NotificationListener() {
         const subscribed = await api.subscribe(client);
         setConnectionState("connected");
         for (const notification of subscribed.recent) {
-          handleNotification(notification);
+          void handleNotification(notification);
         }
       } catch {
         if (!disposed) {

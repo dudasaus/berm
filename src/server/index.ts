@@ -182,6 +182,23 @@ type GitHubSyncResponse = GitHubSyncPayload & {
 const GITHUB_SYNC_CACHE_TTL_MS = 15_000;
 const GITHUB_SYNC_FAILURE_RETRY_MS = 5_000;
 const EMPTY_GITHUB_SYNC_AT = new Date(0).toISOString();
+const NOTIFICATION_WORKER_SCRIPT = `
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  event.waitUntil((async () => {
+    const windows = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+    for (const client of windows) {
+      if ("focus" in client) {
+        return client.focus();
+      }
+    }
+
+    if (self.clients.openWindow) {
+      return self.clients.openWindow("/");
+    }
+  })());
+});
+`.trim();
 const githubSyncCache = new Map<
   string,
   {
@@ -271,6 +288,16 @@ export function buildHealthResponse(): Response {
 
 export function buildVersionResponse(): Response {
   return Response.json({ version, commitHash });
+}
+
+export function buildNotificationWorkerResponse(): Response {
+  return new Response(NOTIFICATION_WORKER_SCRIPT, {
+    headers: {
+      "content-type": "text/javascript; charset=utf-8",
+      "service-worker-allowed": "/",
+      "cache-control": "no-cache",
+    },
+  });
 }
 
 export function buildSessionResponse(
@@ -1307,6 +1334,7 @@ export function createServerConfig(
   return {
     routes: {
       ...resolveAppRoutes(),
+      "/notification-worker.js": () => buildNotificationWorkerResponse(),
       ...prefixRoutes("/api", apiRoutes),
       ...prefixRoutes("/api/v1", apiRoutes),
       "/ws/terminal": terminalRoute,

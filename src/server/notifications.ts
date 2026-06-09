@@ -87,6 +87,7 @@ export class NotificationService {
                 id: notification.id,
                 permission: typeof deliveryRecord.permission === "string" ? deliveryRecord.permission : undefined,
                 nativeShown: typeof deliveryRecord.nativeShown === "boolean" ? deliveryRecord.nativeShown : undefined,
+                nativePath: typeof deliveryRecord.nativePath === "string" ? deliveryRecord.nativePath : undefined,
                 toastShown: typeof deliveryRecord.toastShown === "boolean" ? deliveryRecord.toastShown : undefined,
               }),
             );
