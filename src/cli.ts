@@ -159,6 +159,7 @@ function usage(): string {
     "  berm [--host <hostname>] [--port <number>]",
     "  berm daemon start [--host <hostname>] [--port <number>]",
     "  berm daemon status [--host <hostname>] [--port <number>] [--json]",
+    "  berm notify <title> [--message <message>] [--level <info|success|warning|error>] [--project <id>] [--session <id>] [--json]",
     "  berm notify --title <title> [--message <message>] [--level <info|success|warning|error>] [--project <id>] [--session <id>] [--json]",
     "  berm projects list [--host <hostname>] [--port <number>] [--json]",
     "  berm projects select <path> [--host <hostname>] [--port <number>] [--json]",
@@ -345,6 +346,12 @@ function parseNotifyCommand(argv: string[], index: number, baseOptions: SharedCl
     if (arg === "--session") {
       sessionId = requireOptionValue(arg, argv[index + 1]);
       index += 2;
+      continue;
+    }
+
+    if (!title) {
+      title = arg;
+      index += 1;
       continue;
     }
 

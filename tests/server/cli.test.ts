@@ -58,6 +58,19 @@ describe("parseCliArgs", () => {
   });
 
   test("parses notification commands", () => {
+    expect(parseCliArgs(["notify", "Build finished"])).toEqual({
+      kind: "notify",
+      help: false,
+      host: "127.0.0.1",
+      json: false,
+      level: undefined,
+      message: undefined,
+      port: undefined,
+      projectId: undefined,
+      sessionId: undefined,
+      title: "Build finished",
+    });
+
     expect(
       parseCliArgs([
         "notify",

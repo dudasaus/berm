@@ -1,13 +1,17 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { newWebSocketRpcSession, RpcTarget, type RpcStub } from "capnweb";
+import { Bell, BellOff, WifiOff } from "lucide-react";
 import { toast } from "sonner";
 
+import { Button } from "./ui/button";
 import type { BermNotification } from "../../shared/notifications";
 
 type NotificationApi = {
   subscribe(client: BrowserNotificationClient): Promise<{ recent: BermNotification[] }>;
 };
 
+type BrowserNotificationPermission = NotificationPermission | "unsupported";
+type NotificationConnectionState = "connecting" | "connected" | "disconnected";
 type NotificationToastFn = (title: string, options?: { description?: string; action?: { label: string; onClick: () => void } }) => void;
 
 class BrowserNotificationClient extends RpcTarget {
@@ -38,12 +42,28 @@ function toastForLevel(level: BermNotification["level"]): NotificationToastFn {
   }
 }
 
-function requestPermission() {
-  if (!("Notification" in window) || Notification.permission !== "default") {
-    return;
+function readPermission(): BrowserNotificationPermission {
+  if (!("Notification" in window)) {
+    return "unsupported";
   }
 
-  void Notification.requestPermission().catch(() => {});
+  return Notification.permission;
+}
+
+async function requestPermission(): Promise<BrowserNotificationPermission> {
+  if (!("Notification" in window)) {
+    return "unsupported";
+  }
+
+  if (Notification.permission !== "default") {
+    return Notification.permission;
+  }
+
+  try {
+    return await Notification.requestPermission();
+  } catch {
+    return Notification.permission;
+  }
 }
 
 function showBrowserNotification(notification: BermNotification): boolean {
@@ -68,7 +88,9 @@ function showToast(notification: BermNotification) {
     "Notification" in window && Notification.permission === "default"
       ? {
           label: "Enable",
-          onClick: requestPermission,
+          onClick: () => {
+            void requestPermission();
+          },
         }
       : undefined;
 
@@ -80,10 +102,12 @@ function showToast(notification: BermNotification) {
 
 export function NotificationListener() {
   const seenIdsRef = useRef(new Set<string>());
+  const [permission, setPermission] = useState<BrowserNotificationPermission>(() =>
+    typeof window === "undefined" ? "unsupported" : readPermission(),
+  );
+  const [connectionState, setConnectionState] = useState<NotificationConnectionState>("connecting");
 
   useEffect(() => {
-    requestPermission();
-
     let disposed = false;
     let reconnectTimer: number | null = null;
     let api: RpcStub<NotificationApi> | null = null;
@@ -104,6 +128,7 @@ export function NotificationListener() {
         return;
       }
 
+      setConnectionState("connecting");
       try {
         const client = new BrowserNotificationClient(handleNotification);
         api = newWebSocketRpcSession<NotificationApi>(notificationSocketUrl());
@@ -111,14 +136,17 @@ export function NotificationListener() {
           if (disposed) {
             return;
           }
+          setConnectionState("disconnected");
           reconnectTimer = window.setTimeout(connect, 1_500);
         });
         const subscribed = await api.subscribe(client);
+        setConnectionState("connected");
         for (const notification of subscribed.recent) {
           handleNotification(notification);
         }
       } catch {
         if (!disposed) {
+          setConnectionState("disconnected");
           reconnectTimer = window.setTimeout(connect, 1_500);
         }
       }
@@ -135,5 +163,44 @@ export function NotificationListener() {
     };
   }, []);
 
-  return null;
+  const handleEnableNotifications = async () => {
+    setPermission(await requestPermission());
+  };
+
+  if (permission === "granted" && connectionState === "connected") {
+    return null;
+  }
+
+  const Icon =
+    permission === "default"
+      ? Bell
+      : connectionState === "connected"
+        ? permission === "denied"
+          ? BellOff
+          : Bell
+        : WifiOff;
+  const label =
+    permission === "default"
+      ? "Enable notifications"
+      : connectionState !== "connected"
+        ? "Notifications offline"
+        : permission === "denied"
+          ? "Notifications blocked"
+          : "Notifications unavailable";
+
+  return (
+    <div className="fixed bottom-3 right-3 z-50">
+      <Button
+        type="button"
+        variant={permission === "denied" || connectionState === "disconnected" ? "outline" : "secondary"}
+        size="sm"
+        className="shadow-lg backdrop-blur"
+        onClick={permission === "default" ? handleEnableNotifications : undefined}
+        disabled={permission !== "default"}
+      >
+        <Icon className="h-3.5 w-3.5" />
+        {label}
+      </Button>
+    </div>
+  );
 }

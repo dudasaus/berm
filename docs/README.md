@@ -153,6 +153,7 @@ Agent and CLI integrations should prefer `/api/v1/...`.
   - `level` defaults to `"info"` and may be `"info"`, `"success"`, `"warning"`, or `"error"`
   - `source` defaults to `"api"`; the CLI sends `"cli"`
   - Response shape: `{ ok: true, notification }`
+  - Browsers require a user gesture before native notifications can be enabled; the UI shows an enable control until permission is granted.
   - Server logs emit searchable `notification.received`, `notification.broadcast`, `notification.dropped`, and `notification.publish.completed` events.
 
 ### Projects
