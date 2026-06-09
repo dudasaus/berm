@@ -4,6 +4,7 @@ import { RouterProvider } from "@tanstack/react-router";
 
 import "xterm/css/xterm.css";
 import "./styles.css";
+import { NotificationListener } from "./components/notification-listener";
 import { Toaster } from "./components/ui/sonner";
 import { router } from "./router";
 
@@ -17,6 +18,7 @@ if (!rootElement) {
 createRoot(rootElement).render(
   <QueryClientProvider client={queryClient}>
     <RouterProvider router={router} />
+    <NotificationListener />
     <Toaster />
   </QueryClientProvider>,
 );
