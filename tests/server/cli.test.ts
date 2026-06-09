@@ -57,6 +57,36 @@ describe("parseCliArgs", () => {
     });
   });
 
+  test("parses notification commands", () => {
+    expect(
+      parseCliArgs([
+        "notify",
+        "--title",
+        "Build finished",
+        "--message",
+        "bun test passed",
+        "--level",
+        "success",
+        "--project",
+        "p1",
+        "--session",
+        "s1",
+        "--json",
+      ]),
+    ).toEqual({
+      kind: "notify",
+      help: false,
+      host: "127.0.0.1",
+      json: true,
+      level: "success",
+      message: "bun test passed",
+      port: undefined,
+      projectId: "p1",
+      sessionId: "s1",
+      title: "Build finished",
+    });
+  });
+
   test("parses project selection", () => {
     expect(parseCliArgs(["projects", "select", "/tmp/alpha"])).toEqual({
       kind: "projects-select",
@@ -155,6 +185,9 @@ describe("parseCliArgs", () => {
     expect(() => parseCliArgs(["wat"])).toThrow("Unknown command: wat");
     expect(() => parseCliArgs(["sessions", "lifecycle", "set", "--state", "nope"])).toThrow(
       "Invalid lifecycle state: nope",
+    );
+    expect(() => parseCliArgs(["notify", "--title", "Hello", "--level", "critical"])).toThrow(
+      "Invalid notification level: critical",
     );
     expect(() => parseCliArgs(["sessions", "send", "--project", "p1", "--session", "s1", "--flag"])).toThrow(
       "Unknown argument: --flag",

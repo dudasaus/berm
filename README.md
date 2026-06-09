@@ -27,6 +27,7 @@ Web terminal app powered by Bun PTY + zsh on the backend and TanStack React + xt
 - The left control sidebar can be toggled with `Cmd/Ctrl+Shift+B` or from the command palette.
 - Session tiles can show synced GitHub PR/CI status via `gh` (`open`/`draft`/`merged` and check summary).
 - GitHub badge sync is cached and refreshed in the background, and optional activity indicators can be toggled on to surface when session refresh/GitHub sync work is running.
+- Browser notifications can be triggered by the HTTP API or CLI and are delivered through a Cap'n Web notification socket with toast fallback.
 
 ## Docs
 
@@ -49,6 +50,7 @@ bunx @dudasaus/berm
 - Pass `--host <hostname>` / `-H <hostname>` and `--port <number>` / `-p <number>` to override the bind address.
 - `berm daemon start` is an explicit alias for starting the server.
 - `berm daemon status` checks the local control plane and supports `--json`.
+- `berm notify --title <title> [--message <message>] [--level info|success|warning|error]` sends a browser notification through the running Berm server.
 - `berm projects list`, `berm projects select <path>`, `berm sessions list --project <id>`, `berm sessions create ...`, `berm sessions get ...`, `berm sessions send ...`, `berm sessions delete ...`, and `berm sessions lifecycle set ...` all talk to the running Berm server.
 - `berm sessions send --project <id> --session <id> --command "codex"` sends a command plus Enter into an existing session when the shell is foregrounded; use `--text <text>` to send exact text without an automatic newline.
 - `sessions send` refuses to write into busy panes by default. Use `--force` to intentionally send input to a foreground process such as `codex`, `claude`, a REPL, or `cat`.
@@ -67,6 +69,7 @@ berm sessions create --project proj_123 --worktree --branch feature/external-api
 berm sessions send --project proj_123 --session agent-1 --command "codex"
 berm sessions send --project proj_123 --session agent-1 --text "continue" --force
 berm sessions lifecycle set --project proj_123 --session agent-1 --state implementing
+berm notify --title "Tests passed" --message "bun test completed" --level success
 ```
 
 ## Publish

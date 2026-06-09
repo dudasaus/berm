@@ -24,8 +24,10 @@ A project maps to a real directory path, and each project can contain many termi
 - Frontend runtime: React app mounted from `src/web/index.html` and `src/web/main.tsx`
 - Published package runtime: `prepack` builds `dist/cli.js` plus hashed frontend assets with `bun-plugin-tailwind`, and `bin/berm` prefers the built CLI when present
 - Terminal backend: `TerminalSessionManager` in `src/server/terminal-session.ts`
+- Notification backend: `NotificationService` in `src/server/notifications.ts`, exposed to browsers through Cap'n Web RPC
 - Registry persistence: JSON file managed by `src/server/session-registry.ts`
 - Protocol contract: `src/shared/protocol.ts`
+- Notification contract: `src/shared/notifications.ts`
 - Session lifecycle contract: `src/shared/session-lifecycle.ts`
 
 ## Backend Components
@@ -40,6 +42,7 @@ Responsibilities:
 - Exposes project/session REST APIs
 - Exposes GitHub PR/CI sync API for session tiles (`gh`-powered, stale-while-revalidate cached)
 - Handles WebSocket upgrades for terminal streams
+- Handles Cap'n Web WebSocket upgrades for browser notification subscriptions
 - Converts manager errors into structured JSON responses
 
 Binding behavior:
@@ -139,6 +142,19 @@ Agent and CLI integrations should prefer `/api/v1/...`.
 - `GET /api/version`
 - `GET /api/v1/version`
 
+### Notifications
+
+- `GET /api/notifications`
+- `GET /api/v1/notifications`
+  - Lists recent in-memory notifications for newly connected browsers.
+- `POST /api/notifications`
+- `POST /api/v1/notifications`
+  - Publishes a browser notification with `{ title, message?, level?, projectId?, sessionId?, source? }`
+  - `level` defaults to `"info"` and may be `"info"`, `"success"`, `"warning"`, or `"error"`
+  - `source` defaults to `"api"`; the CLI sends `"cli"`
+  - Response shape: `{ ok: true, notification }`
+  - Server logs emit searchable `notification.received`, `notification.broadcast`, `notification.dropped`, and `notification.publish.completed` events.
+
 ### Projects
 
 - `GET /api/projects`
@@ -194,6 +210,8 @@ Agent and CLI integrations should prefer `/api/v1/...`.
 
 - `GET /ws/terminal?projectId=<id>&sessionId=<id>` (upgrade)
 - `GET /api/v1/ws/terminal?projectId=<id>&sessionId=<id>` (upgrade)
+- `GET /ws/notifications` (Cap'n Web RPC upgrade)
+- `GET /api/v1/ws/notifications` (Cap'n Web RPC upgrade)
 
 ## Terminal Protocol
 

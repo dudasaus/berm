@@ -1,4 +1,5 @@
 import { createServer } from "./server/index";
+import { NOTIFICATION_LEVELS, type NotificationLevel, type NotificationPublishResult } from "./shared/notifications";
 
 const DEFAULT_HOST = Bun.env.BERM_HOST ?? Bun.env.COMMAND_CENTER_HOST ?? "127.0.0.1";
 const DEFAULT_PORT = Number(Bun.env.BERM_PORT ?? Bun.env.COMMAND_CENTER_PORT ?? 3000);
@@ -28,6 +29,15 @@ type ServeCommand = SharedCliOptions & {
 
 type DaemonStatusCommand = SharedCliOptions & {
   kind: "daemon-status";
+};
+
+type NotifyCommand = SharedCliOptions & {
+  kind: "notify";
+  level?: NotificationLevel;
+  message?: string;
+  projectId?: string;
+  sessionId?: string;
+  title?: string;
 };
 
 type ProjectsListCommand = SharedCliOptions & {
@@ -83,6 +93,7 @@ type SessionsLifecycleSetCommand = SharedCliOptions & {
 export type CliCommand =
   | ServeCommand
   | DaemonStatusCommand
+  | NotifyCommand
   | ProjectsListCommand
   | ProjectsSelectCommand
   | SessionsListCommand
@@ -148,6 +159,7 @@ function usage(): string {
     "  berm [--host <hostname>] [--port <number>]",
     "  berm daemon start [--host <hostname>] [--port <number>]",
     "  berm daemon status [--host <hostname>] [--port <number>] [--json]",
+    "  berm notify --title <title> [--message <message>] [--level <info|success|warning|error>] [--project <id>] [--session <id>] [--json]",
     "  berm projects list [--host <hostname>] [--port <number>] [--json]",
     "  berm projects select <path> [--host <hostname>] [--port <number>] [--json]",
     "  berm sessions list --project <id> [--host <hostname>] [--port <number>] [--json]",
@@ -284,6 +296,62 @@ function parseProjectsCommand(argv: string[], index: number, baseOptions: Shared
   }
 
   throw new Error(`Unknown projects subcommand: ${subcommand}`);
+}
+
+function parseNotifyCommand(argv: string[], index: number, baseOptions: SharedCliOptions): CliCommand {
+  const options = cloneOptions(baseOptions);
+  let level: NotificationLevel | undefined;
+  let message: string | undefined;
+  let projectId: string | undefined;
+  let sessionId: string | undefined;
+  let title: string | undefined;
+
+  while (index < argv.length) {
+    const nextIndex = consumeSharedOption(argv, index, options);
+    if (nextIndex !== null) {
+      index = nextIndex;
+      continue;
+    }
+
+    const arg = argv[index];
+    if (arg === "--title") {
+      title = requireOptionValue(arg, argv[index + 1]);
+      index += 2;
+      continue;
+    }
+
+    if (arg === "--message") {
+      message = requireOptionValue(arg, argv[index + 1]);
+      index += 2;
+      continue;
+    }
+
+    if (arg === "--level") {
+      const rawLevel = requireOptionValue(arg, argv[index + 1]);
+      if (!NOTIFICATION_LEVELS.includes(rawLevel as NotificationLevel)) {
+        throw new Error(`Invalid notification level: ${rawLevel}`);
+      }
+      level = rawLevel as NotificationLevel;
+      index += 2;
+      continue;
+    }
+
+    if (arg === "--project") {
+      projectId = requireOptionValue(arg, argv[index + 1]);
+      index += 2;
+      continue;
+    }
+
+    if (arg === "--session") {
+      sessionId = requireOptionValue(arg, argv[index + 1]);
+      index += 2;
+      continue;
+    }
+
+    throw new Error(`Unknown argument: ${arg}`);
+  }
+
+  return { kind: "notify", level, message, projectId, sessionId, title, ...options };
 }
 
 function parseSessionsCommand(argv: string[], index: number, baseOptions: SharedCliOptions): CliCommand {
@@ -578,6 +646,10 @@ export function parseCliArgs(argv: string[]): CliCommand {
     return parseProjectsCommand(argv, index, globalOptions);
   }
 
+  if (command === "notify") {
+    return parseNotifyCommand(argv, index, globalOptions);
+  }
+
   if (command === "sessions") {
     return parseSessionsCommand(argv, index, globalOptions);
   }
@@ -696,6 +768,13 @@ function requireProjectPath(path: string | undefined, help: boolean): string {
   throw new Error("Missing project path");
 }
 
+function requireNotificationTitle(title: string | undefined, help: boolean): string {
+  if (title || help) {
+    return title ?? "";
+  }
+  throw new Error("Missing required option: --title");
+}
+
 async function handleClientCommand(command: CliCommand): Promise<number> {
   switch (command.kind) {
     case "daemon-status": {
@@ -734,6 +813,27 @@ async function handleClientCommand(command: CliCommand): Promise<number> {
         }
         return 1;
       }
+    }
+
+    case "notify": {
+      const title = requireNotificationTitle(command.title, command.help);
+      const payload = await fetchJson<NotificationPublishResult>(command, "/notifications", {
+        method: "POST",
+        body: JSON.stringify({
+          level: command.level,
+          title,
+          message: command.message,
+          projectId: command.projectId,
+          sessionId: command.sessionId,
+          source: "cli",
+        }),
+      });
+      if (command.json) {
+        printJson(payload);
+      } else {
+        console.log(`Sent ${payload.notification.level} notification ${payload.notification.id}`);
+      }
+      return 0;
     }
 
     case "projects-list": {
