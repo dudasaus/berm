@@ -8,7 +8,7 @@ import {
 } from "../shared/notifications";
 
 export interface NotificationClient extends RpcTarget {
-  notify(notification: BermNotification): void | Promise<void>;
+  notify(notification: BermNotification): unknown | Promise<unknown>;
 }
 
 export interface NotificationApi extends RpcTarget {
@@ -78,11 +78,16 @@ export class NotificationService {
     for (const client of [...this.#clients]) {
       try {
         Promise.resolve(client.notify(notification))
-          .then(() => {
+          .then((delivery) => {
+            const deliveryRecord =
+              delivery && typeof delivery === "object" ? (delivery as Record<string, unknown>) : {};
             console.info(
               JSON.stringify({
                 event: "notification.broadcast",
                 id: notification.id,
+                permission: typeof deliveryRecord.permission === "string" ? deliveryRecord.permission : undefined,
+                nativeShown: typeof deliveryRecord.nativeShown === "boolean" ? deliveryRecord.nativeShown : undefined,
+                toastShown: typeof deliveryRecord.toastShown === "boolean" ? deliveryRecord.toastShown : undefined,
               }),
             );
           })

@@ -12,15 +12,20 @@ type NotificationApi = {
 
 type BrowserNotificationPermission = NotificationPermission | "unsupported";
 type NotificationConnectionState = "connecting" | "connected" | "disconnected";
+type BrowserNotificationDelivery = {
+  permission: BrowserNotificationPermission;
+  nativeShown: boolean;
+  toastShown: boolean;
+};
 type NotificationToastFn = (title: string, options?: { description?: string; action?: { label: string; onClick: () => void } }) => void;
 
 class BrowserNotificationClient extends RpcTarget {
-  constructor(private readonly onNotify: (notification: BermNotification) => void) {
+  constructor(private readonly onNotify: (notification: BermNotification) => BrowserNotificationDelivery) {
     super();
   }
 
   notify(notification: BermNotification) {
-    this.onNotify(notification);
+    return this.onNotify(notification);
   }
 }
 
@@ -71,15 +76,19 @@ function showBrowserNotification(notification: BermNotification): boolean {
     return false;
   }
 
-  const browserNotification = new Notification(notification.title, {
-    body: notification.message ?? undefined,
-    tag: notification.id,
-  });
-  browserNotification.onclick = () => {
-    window.focus();
-    browserNotification.close();
-  };
-  return true;
+  try {
+    const browserNotification = new Notification(notification.title, {
+      body: notification.message ?? undefined,
+      tag: notification.id,
+    });
+    browserNotification.onclick = () => {
+      window.focus();
+      browserNotification.close();
+    };
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function showToast(notification: BermNotification) {
@@ -110,16 +119,41 @@ export function NotificationListener() {
   useEffect(() => {
     let disposed = false;
     let reconnectTimer: number | null = null;
+    let pollTimer: number | null = null;
     let api: RpcStub<NotificationApi> | null = null;
 
-    const handleNotification = (notification: BermNotification) => {
+    const handleNotification = (notification: BermNotification): BrowserNotificationDelivery => {
       if (seenIdsRef.current.has(notification.id)) {
-        return;
+        return {
+          permission: readPermission(),
+          nativeShown: false,
+          toastShown: false,
+        };
       }
 
       seenIdsRef.current.add(notification.id);
-      if (!showBrowserNotification(notification)) {
-        showToast(notification);
+      const nativeShown = showBrowserNotification(notification);
+      showToast(notification);
+      return {
+        permission: readPermission(),
+        nativeShown,
+        toastShown: true,
+      };
+    };
+
+    const syncRecentNotifications = async () => {
+      try {
+        const response = await fetch("/api/notifications");
+        if (!response.ok) {
+          return;
+        }
+
+        const payload = (await response.json()) as { notifications?: BermNotification[] };
+        for (const notification of payload.notifications ?? []) {
+          handleNotification(notification);
+        }
+      } catch {
+        // The WebSocket path reports connection state; polling is only a delivery fallback.
       }
     };
 
@@ -153,11 +187,18 @@ export function NotificationListener() {
     };
 
     void connect();
+    void syncRecentNotifications();
+    pollTimer = window.setInterval(() => {
+      void syncRecentNotifications();
+    }, 2_500);
 
     return () => {
       disposed = true;
       if (reconnectTimer) {
         window.clearTimeout(reconnectTimer);
+      }
+      if (pollTimer) {
+        window.clearInterval(pollTimer);
       }
       api?.[Symbol.dispose]();
     };
